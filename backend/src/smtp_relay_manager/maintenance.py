@@ -43,9 +43,15 @@ async def run_maintenance_once(
                 SendAttempt.created_at < now - timedelta(days=retention_days)
             )
         )
-        await database.execute(delete(RateLimit).where(RateLimit.expires_at <= now))
-        await database.execute(delete(WebSession).where(WebSession.expires_at <= now))
-        await database.execute(delete(Invitation).where(Invitation.expires_at <= now))
+        await database.execute(
+            delete(RateLimit).where(RateLimit.expires_at <= now)
+        )
+        await database.execute(
+            delete(WebSession).where(WebSession.expires_at <= now)
+        )
+        await database.execute(
+            delete(Invitation).where(Invitation.expires_at <= now)
+        )
 
 
 async def maintenance_loop(

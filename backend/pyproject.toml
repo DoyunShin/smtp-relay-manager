@@ -11,7 +11,13 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=0.24", "httpx>=0.27"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "ruff>=0.16.8",
+    "mypy>=2.3.1",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -23,3 +29,15 @@ testpaths = ["tests"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/smtp_relay_manager"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 79
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests", "alembic"]
+strict = true

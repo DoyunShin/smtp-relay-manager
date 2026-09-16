@@ -20,7 +20,9 @@ async def main() -> None:
     settings = get_settings()
     settings.validate_secrets()
     engine, session_factory = create_database(settings)
-    certificates = CertificateManager(settings.smtp_cert_dir, settings.smtp_hostname)
+    certificates = CertificateManager(
+        settings.smtp_cert_dir, settings.smtp_hostname
+    )
     certificates.reload(required=True)
     service = RelayService(
         session_factory,
@@ -58,7 +60,8 @@ async def main() -> None:
         watcher.cancel()
         await asyncio.gather(watcher, return_exceptions=True)
         await server.shutdown(
-            max(settings.smtp_idle_timeout, settings.smtp_transaction_timeout) + 1
+            max(settings.smtp_idle_timeout, settings.smtp_transaction_timeout)
+            + 1
         )
         await engine.dispose()
 

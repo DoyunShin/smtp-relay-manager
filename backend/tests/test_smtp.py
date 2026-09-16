@@ -12,10 +12,10 @@ from pathlib import Path
 
 import pytest
 from cryptography import x509
+from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
-from cryptography.fernet import Fernet
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -29,9 +29,15 @@ from smtp_relay_manager.models import (
 )
 from smtp_relay_manager.security import hash_secret
 from smtp_relay_manager.smtp.certificates import CertificateManager
-from smtp_relay_manager.smtp.server import SMTPRelayServer, validate_message_headers
-from smtp_relay_manager.smtp.service import AuthenticatedCredential, AttemptIdentity
-from smtp_relay_manager.smtp.service import RelayService
+from smtp_relay_manager.smtp.server import (
+    SMTPRelayServer,
+    validate_message_headers,
+)
+from smtp_relay_manager.smtp.service import (
+    AttemptIdentity,
+    AuthenticatedCredential,
+    RelayService,
+)
 from smtp_relay_manager.upstream import DeliveryResult
 
 DatabaseFactory = async_sessionmaker[AsyncSession]
@@ -41,7 +47,9 @@ DatabaseFactory = async_sessionmaker[AsyncSession]
 async def database() -> AsyncIterator[DatabaseFactory]:
     url = os.environ.get("TEST_DATABASE_URL")
     if not url:
-        pytest.skip("TEST_DATABASE_URL must point to a disposable MySQL database")
+        pytest.skip(
+            "TEST_DATABASE_URL must point to a disposable MySQL database"
+        )
     engine, factory = create_database(Settings(database_url=url))
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.drop_all)
@@ -63,10 +71,14 @@ def _write_certificate(
         .serial_number(x509.random_serial_number())
         .not_valid_before(datetime.now(UTC) - timedelta(minutes=1))
         .not_valid_after(datetime.now(UTC) + timedelta(days=1))
-        .add_extension(x509.SubjectAlternativeName([x509.DNSName(hostname)]), False)
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(hostname)]), False
+        )
         .sign(key, hashes.SHA256())
     )
-    (directory / "fullchain.pem").write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    (directory / "fullchain.pem").write_bytes(
+        certificate.public_bytes(serialization.Encoding.PEM)
+    )
     (directory / "privkey.pem").write_bytes(
         key.private_bytes(
             serialization.Encoding.PEM,
@@ -115,7 +127,9 @@ async def _response(reader: asyncio.StreamReader) -> bytes:
     return await asyncio.wait_for(reader.readline(), timeout=2)
 
 
-async def _ehlo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bytes:
+async def _ehlo(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> bytes:
     writer.write(b"EHLO client.example\r\n")
     await writer.drain()
     lines = bytearray()
@@ -127,7 +141,9 @@ async def _ehlo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> b
 
 
 @pytest.mark.asyncio
-async def test_starttls_auth_and_relay_over_actual_socket(tmp_path: Path) -> None:
+async def test_starttls_auth_and_relay_over_actual_socket(
+    tmp_path: Path,
+) -> None:
     _write_certificate(tmp_path)
     certificates = CertificateManager(tmp_path, "localhost")
     certificates.reload(required=True)
@@ -172,7 +188,9 @@ async def test_starttls_auth_and_relay_over_actual_socket(tmp_path: Path) -> Non
             b"RCPT TO:<recipient@example.net>\r\n",
             b"DATA\r\n",
         ]
-        for command, expected in zip(commands, [b"250 ", b"250 ", b"354 "], strict=True):
+        for command, expected in zip(
+            commands, [b"250 ", b"250 ", b"354 "], strict=True
+        ):
             writer.write(command)
             await writer.drain()
             assert (await _response(reader)).startswith(expected)
@@ -195,7 +213,9 @@ async def test_starttls_auth_and_relay_over_actual_socket(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_implicit_tls_supports_login_authentication(tmp_path: Path) -> None:
+async def test_implicit_tls_supports_login_authentication(
+    tmp_path: Path,
+) -> None:
     _write_certificate(tmp_path)
     certificates = CertificateManager(tmp_path, "localhost")
     certificates.reload(required=True)
@@ -316,7 +336,8 @@ def test_headers_require_exact_envelope_match() -> None:
 def test_headers_reject_duplicate_from() -> None:
     with pytest.raises(ValueError, match="exactly one"):
         validate_message_headers(
-            b"From: sender@example.com\r\nFrom: sender@example.com\r\n\r\nmessage\r\n",
+            b"From: sender@example.com\r\n"
+            b"From: sender@example.com\r\n\r\nmessage\r\n",
             "sender@example.com",
         )
 
@@ -329,17 +350,25 @@ def test_headers_reject_duplicate_from() -> None:
         b"From: sender@example.com trailing garbage\r\n",
     ],
 )
-def test_headers_reject_parser_recovery_from_ambiguous_from(header: bytes) -> None:
+def test_headers_reject_parser_recovery_from_ambiguous_from(
+    header: bytes,
+) -> None:
     with pytest.raises(ValueError, match="malformed"):
-        validate_message_headers(header + b"\r\nmessage\r\n", "sender@example.com")
+        validate_message_headers(
+            header + b"\r\nmessage\r\n", "sender@example.com"
+        )
 
 
-def test_invalid_certificate_reload_keeps_valid_active_context(tmp_path: Path) -> None:
+def test_invalid_certificate_reload_keeps_valid_active_context(
+    tmp_path: Path,
+) -> None:
     _write_certificate(tmp_path)
     manager = CertificateManager(tmp_path, "localhost")
     manager.reload(required=True)
     context = manager.context
-    (tmp_path / "privkey.pem").write_text("not a private key", encoding="ascii")
+    (tmp_path / "privkey.pem").write_text(
+        "not a private key", encoding="ascii"
+    )
 
     assert manager.reload() is False
     assert manager.usable is True
@@ -355,7 +384,9 @@ def test_certificate_reload_activates_validated_snapshot(
 
     def replace_mount_after_read() -> tuple[bytes, bytes, bytes]:
         snapshot = read_snapshot()
-        (tmp_path / "privkey.pem").write_text("replaced after read", encoding="ascii")
+        (tmp_path / "privkey.pem").write_text(
+            "replaced after read", encoding="ascii"
+        )
         return snapshot
 
     monkeypatch.setattr(manager, "_read_files", replace_mount_after_read)
@@ -364,7 +395,9 @@ def test_certificate_reload_activates_validated_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_certificate_watcher_recovers_after_invalid_files(tmp_path: Path) -> None:
+async def test_certificate_watcher_recovers_after_invalid_files(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "fullchain.pem").write_text("invalid", encoding="ascii")
     (tmp_path / "privkey.pem").write_text("invalid", encoding="ascii")
     manager = CertificateManager(tmp_path, "localhost")
@@ -384,7 +417,9 @@ async def test_certificate_watcher_recovers_after_invalid_files(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_certificate_reload_updates_new_connections_only(tmp_path: Path) -> None:
+async def test_certificate_reload_updates_new_connections_only(
+    tmp_path: Path,
+) -> None:
     first_certificate = _write_certificate(tmp_path)
     manager = CertificateManager(tmp_path, "localhost")
     manager.reload(required=True)
@@ -404,8 +439,13 @@ async def test_certificate_reload_updates_new_connections_only(tmp_path: Path) -
         "127.0.0.1", port, ssl=context, server_hostname="localhost"
     )
     assert (await _response(reader_one)).startswith(b"220 ")
-    peer_one = writer_one.get_extra_info("ssl_object").getpeercert(binary_form=True)
-    assert x509.load_der_x509_certificate(peer_one).serial_number == first_certificate.serial_number
+    peer_one = writer_one.get_extra_info("ssl_object").getpeercert(
+        binary_form=True
+    )
+    assert (
+        x509.load_der_x509_certificate(peer_one).serial_number
+        == first_certificate.serial_number
+    )
 
     second_certificate = _write_certificate(tmp_path)
     assert manager.reload() is True
@@ -414,9 +454,16 @@ async def test_certificate_reload_updates_new_connections_only(tmp_path: Path) -
     )
     try:
         assert (await _response(reader_two)).startswith(b"220 ")
-        peer_two = writer_two.get_extra_info("ssl_object").getpeercert(binary_form=True)
-        assert x509.load_der_x509_certificate(peer_two).serial_number == second_certificate.serial_number
-        assert first_certificate.serial_number != second_certificate.serial_number
+        peer_two = writer_two.get_extra_info("ssl_object").getpeercert(
+            binary_form=True
+        )
+        assert (
+            x509.load_der_x509_certificate(peer_two).serial_number
+            == second_certificate.serial_number
+        )
+        assert (
+            first_certificate.serial_number != second_certificate.serial_number
+        )
         assert b"250-localhost" in await _ehlo(reader_one, writer_one)
     finally:
         writer_one.close()

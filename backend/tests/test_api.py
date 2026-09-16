@@ -1,4 +1,4 @@
-"""Integration tests for the management API and its authorization boundaries."""
+"""Integration tests for management API authorization boundaries."""
 
 from __future__ import annotations
 
@@ -31,9 +31,10 @@ from smtp_relay_manager.models import (
 )
 from smtp_relay_manager.security import hash_password, hash_secret
 
-
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not TEST_DATABASE_URL, reason="TEST_DATABASE_URL is required")
+pytestmark = pytest.mark.skipif(
+    not TEST_DATABASE_URL, reason="TEST_DATABASE_URL is required"
+)
 
 
 class APIClient:
@@ -43,18 +44,28 @@ class APIClient:
         self.client = client
         self.csrf_token: str | None = None
 
-    async def login(self, username: str, password: str = "correct horse battery staple") -> None:
+    async def login(
+        self, username: str, password: str = "correct horse battery staple"
+    ) -> None:
         response = await self.client.post(
-            "/api/v1/auth/login", json={"username": username, "password": password}
+            "/api/v1/auth/login",
+            json={"username": username, "password": password},
         )
         assert response.status_code == 200, response.text
         self.csrf_token = response.json()["data"]["csrf_token"]
 
-    async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+    async def request(
+        self, method: str, url: str, **kwargs: Any
+    ) -> httpx.Response:
         headers = dict(kwargs.pop("headers", {}))
-        if method.upper() not in {"GET", "HEAD", "OPTIONS"} and self.csrf_token:
+        if (
+            method.upper() not in {"GET", "HEAD", "OPTIONS"}
+            and self.csrf_token
+        ):
             headers["X-CSRF-Token"] = self.csrf_token
-        return await self.client.request(method, url, headers=headers, **kwargs)
+        return await self.client.request(
+            method, url, headers=headers, **kwargs
+        )
 
 
 @pytest.fixture
@@ -117,11 +128,15 @@ async def test_operator_invites_user_and_invitation_is_single_use(
         operator = APIClient(raw_operator)
         await operator.login("operator")
 
-        missing_csrf = await raw_operator.post("/api/v1/users", json={"username": "alice"})
+        missing_csrf = await raw_operator.post(
+            "/api/v1/users", json={"username": "alice"}
+        )
         assert missing_csrf.status_code == 403
         assert missing_csrf.json()["status"] == 403
 
-        created = await operator.request("POST", "/api/v1/users", json={"username": "alice"})
+        created = await operator.request(
+            "POST", "/api/v1/users", json={"username": "alice"}
+        )
         assert created.status_code == 201
         assert created.json()["data"]["user"]["active"] is False
         assert created.json()["data"]["user"]["created_at"].endswith("Z")
@@ -131,7 +146,10 @@ async def test_operator_invites_user_and_invitation_is_single_use(
         )
         assert invitation["token"] not in str(created.headers)
 
-    async with client_factory() as first_client, client_factory() as second_client:
+    async with (
+        client_factory() as first_client,
+        client_factory() as second_client,
+    ):
         responses = await asyncio.gather(
             first_client.post(
                 "/api/v1/auth/invitations/accept",
@@ -148,8 +166,13 @@ async def test_operator_invites_user_and_invitation_is_single_use(
                 },
             ),
         )
-        assert sorted(response.status_code for response in responses) == [200, 400]
-        accepted = next(response for response in responses if response.status_code == 200)
+        assert sorted(response.status_code for response in responses) == [
+            200,
+            400,
+        ]
+        accepted = next(
+            response for response in responses if response.status_code == 200
+        )
         assert accepted.json()["data"]["user"]["username"] == "alice"
 
 
@@ -160,7 +183,11 @@ async def test_framework_errors_use_the_api_envelope(
     async with client_factory() as client:
         missing = await client.get("/api/v1/does-not-exist")
         assert missing.status_code == 404
-        assert missing.json() == {"status": 404, "message": "Not Found", "data": None}
+        assert missing.json() == {
+            "status": 404,
+            "message": "Not Found",
+            "data": None,
+        }
 
 
 @pytest.mark.asyncio
@@ -176,14 +203,20 @@ async def test_concurrent_operator_disables_preserve_one_active_operator(
         await second.login("operator-b")
         responses = await asyncio.gather(
             first.request(
-                "PATCH", f"/api/v1/users/{second_user.id}", json={"active": False}
+                "PATCH",
+                f"/api/v1/users/{second_user.id}",
+                json={"active": False},
             ),
             second.request(
-                "PATCH", f"/api/v1/users/{first_user.id}", json={"active": False}
+                "PATCH",
+                f"/api/v1/users/{first_user.id}",
+                json={"active": False},
             ),
         )
         assert 200 in {response.status_code for response in responses}
-        assert any(response.status_code in {401, 403, 409} for response in responses)
+        assert any(
+            response.status_code in {401, 403, 409} for response in responses
+        )
 
     async with application.state.session_factory() as database:
         active_operators = await database.scalar(
@@ -195,14 +228,16 @@ async def test_concurrent_operator_disables_preserve_one_active_operator(
 
 
 @pytest.mark.asyncio
-async def test_disabled_pending_user_cannot_reuse_invitation_and_login_is_rate_limited(
+async def test_disabled_invitee_cannot_reuse_invitation_and_login_is_limited(
     application: Any, client_factory: Callable[[], httpx.AsyncClient]
 ) -> None:
     await add_user(application, "operator", operator=True)
     async with client_factory() as raw_operator:
         operator = APIClient(raw_operator)
         await operator.login("operator")
-        created = await operator.request("POST", "/api/v1/users", json={"username": "pending"})
+        created = await operator.request(
+            "POST", "/api/v1/users", json={"username": "pending"}
+        )
         user_id = created.json()["data"]["user"]["id"]
         invitation = created.json()["data"]["invitation"]
         disabled = await operator.request(
@@ -229,7 +264,10 @@ async def test_disabled_pending_user_cannot_reuse_invitation_and_login_is_rate_l
             assert failed.status_code == 401
         blocked = await raw_login.post(
             "/api/v1/auth/login",
-            json={"username": "operator", "password": "correct horse battery staple"},
+            json={
+                "username": "operator",
+                "password": "correct horse battery staple",
+            },
         )
         assert blocked.status_code == 429
 
@@ -240,10 +278,14 @@ async def test_domain_roles_grants_credentials_and_smtp_config_are_isolated(
     client_factory: Callable[[], httpx.AsyncClient],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def allow_public_host(_host: str, _port: int = 25, **_kwargs: Any) -> None:
+    async def allow_public_host(
+        _host: str, _port: int = 25, **_kwargs: Any
+    ) -> None:
         return None
 
-    monkeypatch.setattr("smtp_relay_manager.api.validate_upstream_host", allow_public_host)
+    monkeypatch.setattr(
+        "smtp_relay_manager.api.validate_upstream_host", allow_public_host
+    )
     await add_user(application, "operator", operator=True)
     owner_user = await add_user(application, "owner")
     await add_user(application, "manager")
@@ -268,15 +310,21 @@ async def test_domain_roles_grants_credentials_and_smtp_config_are_isolated(
         await sender.login("sender")
         await outsider.login("outsider")
 
-        created = await owner.request("POST", "/api/v1/domains", json={"name": "Example.COM."})
+        created = await owner.request(
+            "POST", "/api/v1/domains", json={"name": "Example.COM."}
+        )
         assert created.status_code == 201
         domain_id = created.json()["data"]["id"]
         assert created.json()["data"]["name"] == "example.com"
 
-        approved = await operator.request("POST", f"/api/v1/domains/{domain_id}/approve")
+        approved = await operator.request(
+            "POST", f"/api/v1/domains/{domain_id}/approve"
+        )
         assert approved.status_code == 200
 
-        add_admin = await owner.request("PUT", f"/api/v1/domains/{domain_id}/admins/manager")
+        add_admin = await owner.request(
+            "PUT", f"/api/v1/domains/{domain_id}/admins/manager"
+        )
         assert add_admin.status_code == 200
         address = await manager.request(
             "POST",
@@ -298,12 +346,18 @@ async def test_domain_roles_grants_credentials_and_smtp_config_are_isolated(
             "/api/v1/smtp-credentials",
             json={
                 "name": "production app",
-                "scopes": [{"domain_id": domain_id, "address": "Notice@example.com"}],
-                "expires_at": (utc_now() + timedelta(days=7)).isoformat() + "Z",
+                "scopes": [
+                    {"domain_id": domain_id, "address": "Notice@example.com"}
+                ],
+                "expires_at": (utc_now() + timedelta(days=7)).isoformat()
+                + "Z",
             },
         )
         assert credential.status_code == 201
-        assert credential.json()["data"]["username"] == credential.json()["data"]["credential"]["id"]
+        assert (
+            credential.json()["data"]["username"]
+            == credential.json()["data"]["credential"]["id"]
+        )
         assert credential.json()["data"]["token"]
 
         manager_smtp = await manager.request(
@@ -335,10 +389,14 @@ async def test_domain_roles_grants_credentials_and_smtp_config_are_isolated(
         assert owner_smtp.json()["data"]["password_set"] is True
         assert "top-secret" not in owner_smtp.text
 
-        manager_detail = await manager.request("GET", f"/api/v1/domains/{domain_id}")
+        manager_detail = await manager.request(
+            "GET", f"/api/v1/domains/{domain_id}"
+        )
         assert manager_detail.status_code == 200
         assert manager_detail.json()["data"]["smtp_config"] is None
-        sender_detail = await sender.request("GET", f"/api/v1/domains/{domain_id}")
+        sender_detail = await sender.request(
+            "GET", f"/api/v1/domains/{domain_id}"
+        )
         assert sender_detail.status_code == 200
         assert sender_detail.json()["data"]["addresses"] == []
         assert sender_detail.json()["data"]["admins"] == []
@@ -349,11 +407,15 @@ async def test_domain_roles_grants_credentials_and_smtp_config_are_isolated(
         assert hidden.status_code == 403
 
         transfer = await owner.request(
-            "PUT", f"/api/v1/domains/{domain_id}/owner", json={"username": "manager"}
+            "PUT",
+            f"/api/v1/domains/{domain_id}/owner",
+            json={"username": "manager"},
         )
         assert transfer.status_code == 200
         assert transfer.json()["data"]["owner_user_id"] != owner_user.id
-        old_owner_smtp = await owner.request("GET", f"/api/v1/domains/{domain_id}/smtp")
+        old_owner_smtp = await owner.request(
+            "GET", f"/api/v1/domains/{domain_id}/smtp"
+        )
         assert old_owner_smtp.status_code == 403
 
 
@@ -400,7 +462,11 @@ async def test_log_visibility_matches_operator_owner_and_sender_rules(
                 domain,
                 owner_attempt,
                 unrelated_attempt,
-                SendRecipient(id=new_id(), attempt_id=owner_attempt.id, address="a@example.net"),
+                SendRecipient(
+                    id=new_id(),
+                    attempt_id=owner_attempt.id,
+                    address="a@example.net",
+                ),
             ]
         )
 
@@ -419,7 +485,9 @@ async def test_log_visibility_matches_operator_owner_and_sender_rules(
         for username, api_client in clients.items():
             await api_client.login(username)
 
-        operator_logs = await clients["operator"].request("GET", "/api/v1/logs")
+        operator_logs = await clients["operator"].request(
+            "GET", "/api/v1/logs"
+        )
         owner_logs = await clients["owner"].request("GET", "/api/v1/logs")
         sender_logs = await clients["sender"].request("GET", "/api/v1/logs")
         other_logs = await clients["other"].request("GET", "/api/v1/logs")
@@ -427,12 +495,16 @@ async def test_log_visibility_matches_operator_owner_and_sender_rules(
         assert operator_logs.json()["data"]["total"] == 2
         assert owner_logs.json()["data"]["total"] == 1
         assert sender_logs.json()["data"]["total"] == 1
-        assert sender_logs.json()["data"]["items"][0]["recipients"] == ["a@example.net"]
+        assert sender_logs.json()["data"]["items"][0]["recipients"] == [
+            "a@example.net"
+        ]
         assert other_logs.json()["data"]["total"] == 1
 
 
 @pytest.mark.asyncio
-async def test_maintenance_expires_security_state_and_stale_attempts(application: Any) -> None:
+async def test_maintenance_expires_security_state_and_stale_attempts(
+    application: Any,
+) -> None:
     user = await add_user(application, "maintenance-user")
     now = utc_now()
     stale_attempt = SendAttempt(
@@ -472,7 +544,9 @@ async def test_maintenance_expires_security_state_and_stale_attempts(application
             [stale_attempt, expired_session, expired_invitation, expired_rate]
         )
 
-    await run_maintenance_once(application.state.session_factory, retention_days=30)
+    await run_maintenance_once(
+        application.state.session_factory, retention_days=30
+    )
 
     async with application.state.session_factory() as database:
         refreshed_attempt = await database.get(SendAttempt, stale_attempt.id)
@@ -480,6 +554,9 @@ async def test_maintenance_expires_security_state_and_stale_attempts(application
         assert refreshed_attempt.status == "unknown"
         assert await database.get(WebSession, expired_session.id) is None
         assert await database.get(Invitation, expired_invitation.id) is None
-        assert await database.scalar(
-            select(RateLimit).where(RateLimit.key == expired_rate.key)
-        ) is None
+        assert (
+            await database.scalar(
+                select(RateLimit).where(RateLimit.key == expired_rate.key)
+            )
+            is None
+        )

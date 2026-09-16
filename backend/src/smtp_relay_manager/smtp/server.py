@@ -7,12 +7,12 @@ import base64
 import binascii
 import logging
 from email import policy as email_policy
-from email.headerregistry import AddressHeader
+from email.headerregistry import AddressHeader, BaseHeader
 from email.parser import BytesParser
 from typing import Any, cast
 
 import aiosmtplib
-from aiosmtpd.smtp import AuthResult, Envelope, MISSING, SMTP, Session
+from aiosmtpd.smtp import MISSING, SMTP, AuthResult, Envelope, Session
 
 from smtp_relay_manager.errors import AppError
 from smtp_relay_manager.policy import normalize_address
@@ -29,17 +29,24 @@ class SMTPProtocolError(ValueError):
     """Raised when a submitted message violates relay policy."""
 
 
-def _single_header_address(message: Any, name: str, *, required: bool) -> str | None:
+def _single_header_address(
+    message: Any, name: str, *, required: bool
+) -> str | None:
     values = message.get_all(name, [])
     if not values:
         if required:
             raise SMTPProtocolError(f"exactly one {name} header is required")
         return None
-    if len(values) != 1 or not isinstance(values[0], AddressHeader):
+    if len(values) != 1:
         raise SMTPProtocolError(f"exactly one {name} header is required")
-    if values[0].defects:
+    header = values[0]
+    if not isinstance(header, BaseHeader) or not isinstance(
+        header, AddressHeader
+    ):
+        raise SMTPProtocolError(f"exactly one {name} header is required")
+    if header.defects:
         raise SMTPProtocolError(f"{name} header is malformed")
-    addresses = values[0].addresses
+    addresses = header.addresses
     if len(addresses) != 1 or not addresses[0].addr_spec:
         raise SMTPProtocolError(f"{name} must contain one mailbox")
     return normalize_address(addresses[0].addr_spec)
@@ -50,7 +57,9 @@ def validate_message_headers(message: bytes, envelope_sender: str) -> None:
 
     separator = message.find(b"\r\n\r\n", 0, _MAX_HEADER_BYTES + 1)
     if separator < 0:
-        raise SMTPProtocolError("message has no complete header block within 64 KiB")
+        raise SMTPProtocolError(
+            "message has no complete header block within 64 KiB"
+        )
     parsed = BytesParser(policy=email_policy.default).parsebytes(
         message[: separator + 4], headersonly=True
     )
@@ -68,9 +77,15 @@ def _smtp_code(error: BaseException, default: int = 451) -> int:
     if isinstance(error, AppError):
         return 553 if error.status_code in {401, 403} else 550
     if isinstance(error, RecipientRejected):
-        rejected = [item.code for item in error.results if not 200 <= item.code < 300]
-        temporary = next((code for code in rejected if 400 <= code < 500), None)
-        permanent = next((code for code in rejected if 500 <= code < 600), None)
+        rejected = [
+            item.code for item in error.results if not 200 <= item.code < 300
+        ]
+        temporary = next(
+            (code for code in rejected if 400 <= code < 500), None
+        )
+        permanent = next(
+            (code for code in rejected if 500 <= code < 600), None
+        )
         return temporary or permanent or default
     if isinstance(error, aiosmtplib.SMTPResponseException):
         return error.code if 400 <= error.code <= 599 else default
@@ -78,7 +93,7 @@ def _smtp_code(error: BaseException, default: int = 451) -> int:
 
 
 def _safe_failure(error: BaseException) -> str:
-    """Categorize failures without exposing credentials or library diagnostics."""
+    """Categorize failures without exposing credentials or diagnostics."""
 
     if isinstance(error, AppError):
         if error.status_code == 403:
@@ -128,7 +143,10 @@ class _RelayHandler:
         except (AppError, ValueError):
             return "553 5.7.1 Sender is not authorized"
         except Exception as error:
-            LOGGER.warning("Sender authorization backend failed (%s)", type(error).__name__)
+            LOGGER.warning(
+                "Sender authorization backend failed (%s)",
+                type(error).__name__,
+            )
             return "451 4.3.0 Temporary authorization failure"
         envelope.mail_from = sender
         envelope.transaction_started = asyncio.get_running_loop().time()
@@ -188,14 +206,20 @@ class _RelayHandler:
                 await self.service.mark_accepted(attempt_id)
                 return "250 2.0.0 Message accepted by upstream"
             message = "Upstream SMTP rejected message data"
-            await self.service.mark_failed(attempt_id, str(response.code), "data", message)
+            await self.service.mark_failed(
+                attempt_id, str(response.code), "data", message
+            )
             code = response.code if 400 <= response.code <= 599 else 451
             return f"{code} {_enhanced_status(code)} {message}"
         except DeliveryUncertain as error:
             attempt_id = getattr(error, "attempt_id", None)
             if attempt_id is not None:
                 await self._record_failure(
-                    attempt_id, "unknown", "451", "data", "Delivery result is unknown"
+                    attempt_id,
+                    "unknown",
+                    "451",
+                    "data",
+                    "Delivery result is unknown",
                 )
             return "451 4.4.2 Upstream delivery result is unknown"
         except Exception as error:
@@ -219,11 +243,17 @@ class _RelayHandler:
     ) -> None:
         try:
             if status == "unknown":
-                await self.service.mark_unknown(attempt_id, code, stage, message)
+                await self.service.mark_unknown(
+                    attempt_id, code, stage, message
+                )
             else:
-                await self.service.mark_failed(attempt_id, code, stage, message)
+                await self.service.mark_failed(
+                    attempt_id, code, stage, message
+                )
         except Exception as error:
-            LOGGER.warning("Could not finalize send attempt (%s)", type(error).__name__)
+            LOGGER.warning(
+                "Could not finalize send attempt (%s)", type(error).__name__
+            )
 
 
 def _enhanced_status(code: int) -> str:
@@ -253,7 +283,8 @@ class _RelaySMTP(SMTP):
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         if not self._admitted:
             if not self._admit_connection():
-                transport.write(b"421 4.3.2 Too many connections\r\n")
+                write_transport = cast(asyncio.WriteTransport, transport)
+                write_transport.write(b"421 4.3.2 Too many connections\r\n")
                 transport.close()
                 return
             self._admitted = True
@@ -277,7 +308,9 @@ class _RelaySMTP(SMTP):
                 self._release_connection()
 
     async def smtp_STARTTLS(self, arg: str | None) -> None:
-        if self.transport is not None and self.transport.get_extra_info("ssl_object"):
+        if self.transport is not None and self.transport.get_extra_info(
+            "ssl_object"
+        ):
             await self.push("503 5.5.1 TLS is already active")
             return
         await super().smtp_STARTTLS(arg or "")
@@ -295,7 +328,8 @@ class _RelaySMTP(SMTP):
                 ):
                     await super().smtp_DATA(arg or "")
             except TimeoutError:
-                self._set_post_data_state()
+                # aiosmtpd does not type this internal state-reset helper.
+                self._set_post_data_state()  # type: ignore[no-untyped-call]
                 await self.push("451 4.4.2 SMTP transaction timed out")
         finally:
             self._relay_handler.data_limit.release()
@@ -305,8 +339,13 @@ class _RelaySMTP(SMTP):
     ) -> AuthResult:
         if authz and authz != username:
             return AuthResult(success=False)
-        if self.transport is None or self.transport.get_extra_info("ssl_object") is None:
-            return AuthResult(success=False, message="538 5.7.11 Encryption required")
+        if (
+            self.transport is None
+            or self.transport.get_extra_info("ssl_object") is None
+        ):
+            return AuthResult(
+                success=False, message="538 5.7.11 Encryption required"
+            )
         assert self.session is not None
         peer_info = self.session.peer
         peer = str(peer_info[0]) if peer_info else "unknown"
@@ -317,9 +356,12 @@ class _RelaySMTP(SMTP):
         except (UnicodeDecodeError, AppError):
             return AuthResult(success=False)
         except Exception as error:
-            LOGGER.warning("SMTP authentication backend failed (%s)", type(error).__name__)
+            LOGGER.warning(
+                "SMTP authentication backend failed (%s)", type(error).__name__
+            )
             return AuthResult(
-                success=False, message="454 4.7.0 Temporary authentication failure"
+                success=False,
+                message="454 4.7.0 Temporary authentication failure",
             )
         return AuthResult(success=True, auth_data=credential)
 
@@ -332,7 +374,9 @@ class _RelaySMTP(SMTP):
             try:
                 raw = base64.b64decode(args[1].encode("ascii"), validate=True)
             except (UnicodeEncodeError, binascii.Error):
-                await self.push("501 5.5.2 Invalid base64 authentication value")
+                await self.push(
+                    "501 5.5.2 Invalid base64 authentication value"
+                )
                 return AuthResult(success=False, handled=True)
         try:
             authz, username, password = raw.split(b"\x00")
@@ -343,14 +387,20 @@ class _RelaySMTP(SMTP):
 
     async def auth_LOGIN(self, _: SMTP, args: list[str]) -> AuthResult:
         if len(args) == 1:
-            username = await self.challenge_auth(self.AuthLoginUsernameChallenge)
+            username = await self.challenge_auth(
+                self.AuthLoginUsernameChallenge
+            )
             if username is MISSING:
                 return AuthResult(success=False)
         else:
             try:
-                username = base64.b64decode(args[1].encode("ascii"), validate=True)
+                username = base64.b64decode(
+                    args[1].encode("ascii"), validate=True
+                )
             except (UnicodeEncodeError, binascii.Error):
-                await self.push("501 5.5.2 Invalid base64 authentication value")
+                await self.push(
+                    "501 5.5.2 Invalid base64 authentication value"
+                )
                 return AuthResult(success=False, handled=True)
         password = await self.challenge_auth(self.AuthLoginPasswordChallenge)
         if password is MISSING:
@@ -432,7 +482,9 @@ class SMTPRelayServer:
         if self._servers:
             return
         if not self.certificates.usable:
-            raise RuntimeError("SMTP TLS certificate is unavailable or expired")
+            raise RuntimeError(
+                "SMTP TLS certificate is unavailable or expired"
+            )
         loop = asyncio.get_running_loop()
         implicit = await loop.create_server(
             lambda: self._protocol_factory(implicit_tls=True),
@@ -462,7 +514,7 @@ class SMTPRelayServer:
         await asyncio.gather(*(server.wait_closed() for server in servers))
 
     async def shutdown(self, timeout: float) -> None:
-        """Stop listeners, then give established sessions bounded drain time."""
+        """Stop listeners and give established sessions bounded drain time."""
 
         await self.close()
         try:
@@ -476,7 +528,9 @@ class SMTPRelayServer:
         """Serve until cancelled."""
 
         await self.start()
-        await asyncio.gather(*(server.serve_forever() for server in self._servers))
+        await asyncio.gather(
+            *(server.serve_forever() for server in self._servers)
+        )
 
 
 __all__ = ["SMTPProtocolError", "SMTPRelayServer", "validate_message_headers"]

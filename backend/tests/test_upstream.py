@@ -12,20 +12,22 @@ from smtp_relay_manager.upstream import (
     UnsafeUpstreamHost,
     UpstreamAuth,
     UpstreamEndpoint,
-    UpstreamSMTP,
     UpstreamSecurity,
+    UpstreamSMTP,
     resolve_public_addresses,
     validate_upstream_endpoint,
 )
 
 
-async def test_resolution_rejects_entire_answer_when_one_address_is_private() -> None:
+async def test_resolution_rejects_mixed_public_and_private_answer() -> None:
     async def resolver(host: str, port: int) -> list[tuple[int, str]]:
         assert (host, port) == ("smtp.example.com", 25)
         return [(socket.AF_INET, "203.0.113.2"), (socket.AF_INET, "127.0.0.1")]
 
     with pytest.raises(UnsafeUpstreamHost):
-        await resolve_public_addresses("smtp.example.com", 25, resolver=resolver)
+        await resolve_public_addresses(
+            "smtp.example.com", 25, resolver=resolver
+        )
 
 
 @pytest.mark.parametrize(
@@ -42,7 +44,9 @@ async def test_resolution_error_is_safe_validation_failure() -> None:
         raise socket.gaierror("resolver detail")
 
     with pytest.raises(UnsafeUpstreamHost, match="could not be resolved"):
-        await resolve_public_addresses("missing.example", 25, resolver=resolver)
+        await resolve_public_addresses(
+            "missing.example", 25, resolver=resolver
+        )
 
 
 def test_password_authentication_requires_tls() -> None:
@@ -58,7 +62,9 @@ def test_password_authentication_requires_tls() -> None:
         validate_upstream_endpoint(endpoint)
 
 
-@pytest.mark.parametrize("host", [" smtp.example.com", "smtp.example.com\nother"])
+@pytest.mark.parametrize(
+    "host", [" smtp.example.com", "smtp.example.com\nother"]
+)
 def test_host_rejects_ambiguous_lexical_input(host: str) -> None:
     endpoint = UpstreamEndpoint(host, 25, UpstreamSecurity.NONE)
     with pytest.raises(UnsafeUpstreamHost):

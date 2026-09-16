@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -22,14 +22,15 @@ from smtp_relay_manager.security import (
 )
 from smtp_relay_manager.upstream import (
     DeliveryResult,
-    UpstreamError,
     UpstreamAuth,
     UpstreamEndpoint,
-    UpstreamSMTP,
+    UpstreamError,
     UpstreamSecurity,
+    UpstreamSMTP,
 )
 
 LOGGER = logging.getLogger(__name__)
+AttemptStatus = Literal["pending", "accepted", "failed", "unknown"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,8 +91,12 @@ class RelayService:
         if not permitted:
             raise AppError(429, "Too many authentication attempts")
         async with self._session() as session:
-            credential = await authenticate_smtp(session, credential_id, secret)
-            authenticated = AuthenticatedCredential(credential.id, credential.user_id)
+            credential = await authenticate_smtp(
+                session, credential_id, secret
+            )
+            authenticated = AuthenticatedCredential(
+                credential.id, credential.user_id
+            )
         await release_rate_limit(self.session_factory, keys, started_at)
         return authenticated
 
@@ -111,12 +116,16 @@ class RelayService:
         async with self._session() as session:
             domain = await authorize_sender(session, credential.id, sender)
             config = await session.scalar(
-                select(models.SMTPConfig).where(models.SMTPConfig.domain_id == domain.id)
+                select(models.SMTPConfig).where(
+                    models.SMTPConfig.domain_id == domain.id
+                )
             )
             if config is None:
                 raise AppError(409, "upstream SMTP is not configured")
             password = (
-                decrypt_password(config.password_encrypted, self.encryption_key)
+                decrypt_password(
+                    config.password_encrypted, self.encryption_key
+                )
                 if config.password_encrypted is not None
                 else None
             )
@@ -139,7 +148,9 @@ class RelayService:
             session.add(attempt)
             session.add_all(
                 models.SendRecipient(
-                    id=models.new_id(), attempt_id=attempt.id, address=recipient
+                    id=models.new_id(),
+                    attempt_id=attempt.id,
+                    address=recipient,
                 )
                 for recipient in recipients
             )
@@ -149,20 +160,24 @@ class RelayService:
     async def _finalize(
         self,
         attempt_id: str,
-        status: str,
+        status: AttemptStatus,
         *,
         code: str | None = None,
         stage: str | None = None,
         message: str | None = None,
     ) -> None:
         async with self._session() as session:
-            attempt = await session.get(models.SendAttempt, attempt_id, with_for_update=True)
+            attempt = await session.get(
+                models.SendAttempt, attempt_id, with_for_update=True
+            )
             if attempt is None:
                 raise RuntimeError("send attempt disappeared")
             attempt.status = status
             attempt.error_code = code[:32] if code is not None else None
             attempt.error_stage = stage[:32] if stage is not None else None
-            attempt.error_message = message[:255] if message is not None else None
+            attempt.error_message = (
+                message[:255] if message is not None else None
+            )
             attempt.updated_at = models.utc_now()
             await session.commit()
 
@@ -181,7 +196,7 @@ class RelayService:
         upstream: UpstreamSMTP | None = None
 
         async def reauthorize() -> None:
-            # A new session provides a READ COMMITTED view immediately before DATA.
+            # Use a READ COMMITTED view immediately before DATA.
             await self.authorize(credential.id, sender)
 
         try:
@@ -195,7 +210,9 @@ class RelayService:
                 sender, recipients, message, pre_data_hook=reauthorize
             )
         except asyncio.CancelledError as exc:
-            failure = UpstreamError("upstream transaction timed out before DATA")
+            failure = UpstreamError(
+                "upstream transaction timed out before DATA"
+            )
             setattr(failure, "attempt_id", attempt.attempt_id)
             raise failure from exc
         except BaseException as exc:
@@ -213,7 +230,7 @@ class RelayService:
             await self._finalize(attempt_id, "accepted")
         except BaseException as error:
             LOGGER.warning(
-                "Upstream accepted message but attempt finalization failed (%s)",
+                "Upstream accepted but attempt finalization failed (%s)",
                 type(error).__name__,
             )
 

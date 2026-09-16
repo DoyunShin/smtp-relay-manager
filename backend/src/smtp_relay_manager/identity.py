@@ -28,7 +28,9 @@ class LocalIdentityProvider:
         self, database: AsyncSession, username: str, password: str
     ) -> User | None:
         """Return an active user when the supplied password is valid."""
-        user = await database.scalar(select(User).where(User.username == username))
+        user = await database.scalar(
+            select(User).where(User.username == username)
+        )
         if (
             user is None
             or not user.active

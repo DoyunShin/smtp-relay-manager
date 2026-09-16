@@ -1,13 +1,20 @@
 """Shared authorization boundary for HTTP and SMTP adapters."""
 
 import re
+from typing import Literal
 
 from sqlalchemy import exists, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from smtp_relay_manager.errors import AppError
 from smtp_relay_manager.models import (
-    CredentialScope, Domain, DomainAdmin, SenderGrant, SMTPCredential, User, utc_now,
+    CredentialScope,
+    Domain,
+    DomainAdmin,
+    SenderGrant,
+    SMTPCredential,
+    User,
+    utc_now,
 )
 from smtp_relay_manager.security import verify_secret
 
@@ -21,16 +28,24 @@ def normalize_domain(value: str) -> str:
     Returns:
         Lowercase IDNA ASCII domain without a trailing dot.
     """
-    if not value or value != value.strip() or any(c in value for c in "\r\n\x00/@:"):
+    if (
+        not value
+        or value != value.strip()
+        or any(c in value for c in "\r\n\x00/@:")
+    ):
         raise AppError(422, "Invalid domain name")
     try:
         domain = value.rstrip(".").encode("idna").decode("ascii").lower()
     except UnicodeError as exc:
         raise AppError(422, "Invalid domain name") from exc
     labels = domain.split(".")
-    if len(domain) > 253 or len(labels) < 2 or any(
-        not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
-        for label in labels
+    if (
+        len(domain) > 253
+        or len(labels) < 2
+        or any(
+            not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+            for label in labels
+        )
     ):
         raise AppError(422, "Invalid domain name")
     return domain
@@ -48,12 +63,17 @@ def normalize_address(value: str) -> str:
     if value.count("@") != 1 or len(value) > 254:
         raise AppError(422, "Invalid sender address")
     local, domain = value.rsplit("@", 1)
-    if len(local) > 64 or not re.fullmatch(r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*", local):
+    if len(local) > 64 or not re.fullmatch(
+        r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*",
+        local,
+    ):
         raise AppError(422, "Invalid sender address")
     return f"{local}@{normalize_domain(domain)}"
 
 
-async def get_domain_role(db: AsyncSession, user: User, domain: Domain) -> str | None:
+async def get_domain_role(
+    db: AsyncSession, user: User, domain: Domain
+) -> Literal["owner", "admin"] | None:
     """Resolve a user's management role in a live domain.
 
     Args:
@@ -73,7 +93,10 @@ async def get_domain_role(db: AsyncSession, user: User, domain: Domain) -> str |
 
 
 async def require_domain_role(
-    db: AsyncSession, user: User, domain: Domain, roles: tuple[str, ...],
+    db: AsyncSession,
+    user: User,
+    domain: Domain,
+    roles: tuple[str, ...],
 ) -> None:
     """Reject domain operations outside the supplied role set.
 
@@ -90,7 +113,9 @@ async def require_domain_role(
         raise AppError(403, "Domain permission denied")
 
 
-async def validate_scope(db: AsyncSession, user_id: str, domain_id: str, address: str) -> None:
+async def validate_scope(
+    db: AsyncSession, user_id: str, domain_id: str, address: str
+) -> None:
     """Ensure a proposed token scope cannot exceed current sender grants.
 
     Args:
@@ -105,17 +130,27 @@ async def validate_scope(db: AsyncSession, user_id: str, domain_id: str, address
     domain = await db.get(Domain, domain_id)
     if not domain or domain.deleted_at or domain.status != "approved":
         raise AppError(403, "Domain is not approved")
-    if address != "*" and normalize_address(address).rsplit("@", 1)[1] != domain.name:
+    if (
+        address != "*"
+        and normalize_address(address).rsplit("@", 1)[1] != domain.name
+    ):
         raise AppError(422, "Address does not belong to the domain")
-    granted = await db.scalar(select(SenderGrant.id).where(
-        SenderGrant.domain_id == domain_id, SenderGrant.user_id == user_id,
-        SenderGrant.address.in_(["*", address]),
-    ).limit(1))
+    granted = await db.scalar(
+        select(SenderGrant.id)
+        .where(
+            SenderGrant.domain_id == domain_id,
+            SenderGrant.user_id == user_id,
+            SenderGrant.address.in_(["*", address]),
+        )
+        .limit(1)
+    )
     if not granted:
         raise AppError(403, "Scope exceeds current sender permissions")
 
 
-async def authenticate_smtp(db: AsyncSession, credential_id: str, secret: str) -> SMTPCredential:
+async def authenticate_smtp(
+    db: AsyncSession, credential_id: str, secret: str
+) -> SMTPCredential:
     """Authenticate an SMTP token against the live user and token state.
 
     Args:
@@ -126,18 +161,28 @@ async def authenticate_smtp(db: AsyncSession, credential_id: str, secret: str) -
     Returns:
         The validated credential.
     """
-    credential = await db.scalar(select(SMTPCredential).join(User).where(
-        SMTPCredential.id == credential_id, SMTPCredential.revoked_at.is_(None),
-        or_(SMTPCredential.expires_at.is_(None), SMTPCredential.expires_at > utc_now()),
-        User.active.is_(True),
-    ))
+    credential = await db.scalar(
+        select(SMTPCredential)
+        .join(User)
+        .where(
+            SMTPCredential.id == credential_id,
+            SMTPCredential.revoked_at.is_(None),
+            or_(
+                SMTPCredential.expires_at.is_(None),
+                SMTPCredential.expires_at > utc_now(),
+            ),
+            User.active.is_(True),
+        )
+    )
     expected = credential.secret_hash if credential else "0" * 64
     if not verify_secret(secret, expected) or not credential:
         raise AppError(401, "Invalid SMTP credentials")
     return credential
 
 
-async def authorize_sender(db: AsyncSession, credential_id: str, sender: str) -> Domain:
+async def authorize_sender(
+    db: AsyncSession, credential_id: str, sender: str
+) -> Domain:
     """Authorize a sender using a single current database snapshot.
 
     Args:
@@ -150,24 +195,41 @@ async def authorize_sender(db: AsyncSession, credential_id: str, sender: str) ->
     """
     address = normalize_address(sender)
     domain_name = address.rsplit("@", 1)[1]
-    grant = exists(select(SenderGrant.id).where(
-        SenderGrant.domain_id == Domain.id,
-        SenderGrant.user_id == SMTPCredential.user_id,
-        SenderGrant.address.in_(["*", address]),
-    )).correlate(Domain, SMTPCredential)
-    scope = exists(select(CredentialScope.id).where(
-        CredentialScope.credential_id == SMTPCredential.id,
-        CredentialScope.domain_id == Domain.id,
-        CredentialScope.address.in_(["*", address]),
-    )).correlate(Domain, SMTPCredential)
-    statement = select(Domain).join(SMTPCredential, true()).join(
-        User, User.id == SMTPCredential.user_id,
-    ).where(
-        Domain.active_name == domain_name, Domain.status == "approved",
-        Domain.deleted_at.is_(None), SMTPCredential.id == credential_id,
-        SMTPCredential.revoked_at.is_(None), User.active.is_(True),
-        or_(SMTPCredential.expires_at.is_(None), SMTPCredential.expires_at > utc_now()),
-        grant, scope,
+    grant = exists(
+        select(SenderGrant.id).where(
+            SenderGrant.domain_id == Domain.id,
+            SenderGrant.user_id == SMTPCredential.user_id,
+            SenderGrant.address.in_(["*", address]),
+        )
+    ).correlate(Domain, SMTPCredential)
+    scope = exists(
+        select(CredentialScope.id).where(
+            CredentialScope.credential_id == SMTPCredential.id,
+            CredentialScope.domain_id == Domain.id,
+            CredentialScope.address.in_(["*", address]),
+        )
+    ).correlate(Domain, SMTPCredential)
+    statement = (
+        select(Domain)
+        .join(SMTPCredential, true())
+        .join(
+            User,
+            User.id == SMTPCredential.user_id,
+        )
+        .where(
+            Domain.active_name == domain_name,
+            Domain.status == "approved",
+            Domain.deleted_at.is_(None),
+            SMTPCredential.id == credential_id,
+            SMTPCredential.revoked_at.is_(None),
+            User.active.is_(True),
+            or_(
+                SMTPCredential.expires_at.is_(None),
+                SMTPCredential.expires_at > utc_now(),
+            ),
+            grant,
+            scope,
+        )
     )
     domain = await db.scalar(statement)
     if not domain:

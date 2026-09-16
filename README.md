@@ -75,8 +75,22 @@ Python dependencies are managed with `uv`; frontend dependencies use npm lockfil
 ```sh
 cd backend
 uv sync --python 3.12
-uv run pytest
+uv run --python 3.12 ruff check .
+uv run --python 3.12 ruff format --check .
+uv run --python 3.12 mypy
+uv run --python 3.12 pytest
 ```
+
+Ruff checks Python source, tests, and Alembic migrations with a 79-character
+line limit and the `E`, `F`, `I`, and `W` rule sets. Run
+`uv run --python 3.12 ruff check --fix .` and
+`uv run --python 3.12 ruff format .` from `backend` to apply safe lint fixes
+and formatting, then repeat both checks. New migrations follow the same rules.
+Mypy runs in strict mode over `src`, `tests`, and `alembic`, targeting Python
+3.12. These checks complement the runtime tests; they do not replace them.
+The untyped `aiosmtpd` internal DATA-reset call has one documented,
+error-specific type-check exception. Tests retain narrow exceptions for
+injecting fake SMTP services and clients. There are no module-wide exclusions.
 
 Database integration tests require `TEST_DATABASE_URL` pointing to a **disposable MySQL database**. The tests recreate tables. Never use an application or production database. Tests that require MySQL explicitly skip if the variable is absent.
 

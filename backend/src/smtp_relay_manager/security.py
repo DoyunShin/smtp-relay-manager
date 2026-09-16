@@ -73,7 +73,9 @@ async def verify_password(password: str, encoded: str) -> bool:
         Whether the password is valid.
     """
     try:
-        return await asyncio.to_thread(PasswordHasher().verify, encoded, password)
+        return await asyncio.to_thread(
+            PasswordHasher().verify, encoded, password
+        )
     except (VerificationError, InvalidHashError):
         return False
 
@@ -88,7 +90,11 @@ def encrypt_password(password: str, key: str) -> str:
     Returns:
         Authenticated ciphertext safe for database storage.
     """
-    return Fernet(key.encode("ascii")).encrypt(password.encode("utf-8")).decode("ascii")
+    return (
+        Fernet(key.encode("ascii"))
+        .encrypt(password.encode("utf-8"))
+        .decode("ascii")
+    )
 
 
 def decrypt_password(encrypted: str, key: str) -> str:
@@ -101,21 +107,29 @@ def decrypt_password(encrypted: str, key: str) -> str:
     Returns:
         The plaintext credential.
     """
-    return Fernet(key.encode("ascii")).decrypt(encrypted.encode("ascii")).decode("utf-8")
+    return (
+        Fernet(key.encode("ascii"))
+        .decrypt(encrypted.encode("ascii"))
+        .decode("utf-8")
+    )
 
 
 async def consume_rate_limit(
-    factory: async_sessionmaker[AsyncSession], keys: list[str],
-    limits: list[int], window_seconds: int = 900, *, started_at: datetime | None = None,
+    factory: async_sessionmaker[AsyncSession],
+    keys: list[str],
+    limits: list[int],
+    window_seconds: int = 900,
+    *,
+    started_at: datetime | None = None,
 ) -> bool:
     """Atomically consume authentication attempts across service instances.
 
     Args:
         factory: Factory for independent database transactions.
-        keys: Namespaced buckets ordered from the IP to the IP and identity pair.
+        keys: Buckets ordered from the IP to the IP and identity pair.
         limits: Maximum attempts corresponding to each key.
         window_seconds: Fixed-window duration.
-        started_at: Shared reservation timestamp when successful attempts release it.
+        started_at: Reservation timestamp shared with successful releases.
 
     Returns:
         Whether all buckets permit this attempt. Outer limits prevent creation
@@ -129,11 +143,23 @@ async def consume_rate_limit(
     async with factory.begin() as db:
         for key, limit in zip(keys, limits, strict=True):
             digest = hash_secret(key)
-            statement = insert(RateLimit).values(
-                key=digest, attempts=0, expires_at=now + timedelta(seconds=window_seconds),
-            ).on_duplicate_key_update(key=digest)
+            statement = (
+                insert(RateLimit)
+                .values(
+                    key=digest,
+                    attempts=0,
+                    expires_at=now + timedelta(seconds=window_seconds),
+                )
+                .on_duplicate_key_update(key=digest)
+            )
             await db.execute(statement)
-            bucket = await db.scalar(select(RateLimit).where(RateLimit.key == digest).with_for_update())
+            bucket = (
+                await db.execute(
+                    select(RateLimit)
+                    .where(RateLimit.key == digest)
+                    .with_for_update()
+                )
+            ).scalar_one()
             if bucket.expires_at <= now:
                 bucket.attempts = 0
                 bucket.expires_at = now + timedelta(seconds=window_seconds)
@@ -145,10 +171,12 @@ async def consume_rate_limit(
 
 
 async def release_rate_limit(
-    factory: async_sessionmaker[AsyncSession], keys: list[str],
-    started_at: datetime, window_seconds: int = 900,
+    factory: async_sessionmaker[AsyncSession],
+    keys: list[str],
+    started_at: datetime,
+    window_seconds: int = 900,
 ) -> None:
-    """Release successful authentication reservations without clearing failures.
+    """Release successful auth reservations without clearing failures.
 
     Args:
         factory: Factory for independent database transactions.
@@ -158,8 +186,14 @@ async def release_rate_limit(
     """
     async with factory.begin() as db:
         for key in keys:
-            bucket = await db.scalar(select(RateLimit).where(
-                RateLimit.key == hash_secret(key),
-            ).with_for_update())
-            if bucket and bucket.expires_at <= started_at + timedelta(seconds=window_seconds):
+            bucket = await db.scalar(
+                select(RateLimit)
+                .where(
+                    RateLimit.key == hash_secret(key),
+                )
+                .with_for_update()
+            )
+            if bucket and bucket.expires_at <= started_at + timedelta(
+                seconds=window_seconds
+            ):
                 bucket.attempts = max(0, bucket.attempts - 1)

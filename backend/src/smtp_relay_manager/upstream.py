@@ -9,7 +9,7 @@ import ssl
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Protocol, cast
 
 import aiosmtplib
 
@@ -64,7 +64,7 @@ class UpstreamError(Exception):
 
 
 class UnsafeUpstreamHost(UpstreamError):
-    """Raised when a host is invalid or resolves outside the public Internet."""
+    """Raised for invalid hosts or addresses outside the public Internet."""
 
 
 class RecipientRejected(UpstreamError):
@@ -83,17 +83,49 @@ Resolver = Callable[[str, int], Awaitable[Sequence[tuple[int, str]]]]
 SocketConnector = Callable[[int, str, int, float], Awaitable[socket.socket]]
 
 
+class SMTPResponse(Protocol):
+    """Response fields consumed from aiosmtplib and test clients."""
+
+    @property
+    def code(self) -> int: ...
+
+    @property
+    def message(self) -> str | bytes: ...
+
+
 class SMTPClient(Protocol):
     """Subset of aiosmtplib.SMTP used by the relay."""
 
-    async def connect(self, **kwargs: Any) -> Any: ...
-    async def starttls(self, **kwargs: Any) -> Any: ...
-    async def login(self, username: str, password: str, **kwargs: Any) -> Any: ...
-    async def mail(self, sender: str, **kwargs: Any) -> Any: ...
-    async def rcpt(self, recipient: str, **kwargs: Any) -> Any: ...
-    async def data(self, message: bytes, **kwargs: Any) -> Any: ...
-    async def rset(self, **kwargs: Any) -> Any: ...
-    async def quit(self, **kwargs: Any) -> Any: ...
+    async def connect(
+        self, *, sock: socket.socket, timeout: float
+    ) -> SMTPResponse: ...
+
+    async def starttls(
+        self,
+        *,
+        validate_certs: bool,
+        tls_context: ssl.SSLContext,
+        timeout: float,
+    ) -> SMTPResponse: ...
+
+    async def login(
+        self, username: str, password: str, *, timeout: float
+    ) -> SMTPResponse: ...
+
+    async def mail(self, sender: str, *, timeout: float) -> SMTPResponse: ...
+
+    async def rcpt(
+        self, recipient: str, *, timeout: float
+    ) -> SMTPResponse: ...
+
+    async def data(
+        self, message: bytes, *, timeout: float
+    ) -> SMTPResponse: ...
+
+    async def rset(self, *, timeout: float) -> SMTPResponse: ...
+
+    async def quit(self, *, timeout: float) -> SMTPResponse: ...
+
     def close(self) -> None: ...
 
 
@@ -101,12 +133,16 @@ def normalize_upstream_host(host: str) -> str:
     """Return a safe ASCII host name, rejecting SMTP/config injection."""
 
     if host != host.strip():
-        raise UnsafeUpstreamHost("upstream host contains surrounding whitespace")
+        raise UnsafeUpstreamHost(
+            "upstream host contains surrounding whitespace"
+        )
     if host.endswith(".."):
         raise UnsafeUpstreamHost("upstream host has multiple trailing dots")
     candidate = host.rstrip(".")
     if not candidate or any(ord(character) < 32 for character in candidate):
-        raise UnsafeUpstreamHost("upstream host is empty or contains control characters")
+        raise UnsafeUpstreamHost(
+            "upstream host is empty or contains control characters"
+        )
     if candidate.startswith("[") and candidate.endswith("]"):
         candidate = candidate[1:-1]
     try:
@@ -116,13 +152,17 @@ def normalize_upstream_host(host: str) -> str:
     try:
         ascii_host = candidate.encode("idna").decode("ascii").lower()
     except UnicodeError as exc:
-        raise UnsafeUpstreamHost("upstream host is not a valid DNS name") from exc
+        raise UnsafeUpstreamHost(
+            "upstream host is not a valid DNS name"
+        ) from exc
     if len(ascii_host) > 253 or any(
         not label
         or len(label) > 63
         or label.startswith("-")
         or label.endswith("-")
-        or not all(character.isalnum() or character == "-" for character in label)
+        or not all(
+            character.isalnum() or character == "-" for character in label
+        )
         for label in ascii_host.split(".")
     ):
         raise UnsafeUpstreamHost("upstream host is not a valid DNS name")
@@ -139,11 +179,15 @@ def validate_upstream_endpoint(endpoint: UpstreamEndpoint) -> None:
         if endpoint.security is UpstreamSecurity.NONE:
             raise ValueError("password authentication requires TLS")
         if not endpoint.username or endpoint.password is None:
-            raise ValueError("password authentication requires username and password")
+            raise ValueError(
+                "password authentication requires username and password"
+            )
         if any(character in endpoint.username for character in "\r\n\x00"):
             raise ValueError("upstream username contains control characters")
     elif endpoint.username is not None or endpoint.password is not None:
-        raise ValueError("credentials must be omitted when authentication is disabled")
+        raise ValueError(
+            "credentials must be omitted when authentication is disabled"
+        )
 
 
 async def _system_resolver(host: str, port: int) -> Sequence[tuple[int, str]]:
@@ -158,7 +202,7 @@ async def _system_resolver(host: str, port: int) -> Sequence[tuple[int, str]]:
     unique: list[tuple[int, str]] = []
     seen: set[tuple[int, str]] = set()
     for family, _, _, _, sockaddr in records:
-        item = (family, sockaddr[0])
+        item = (int(family), cast(str, sockaddr[0]))
         if item not in seen:
             seen.add(item)
             unique.append(item)
@@ -175,29 +219,46 @@ async def resolve_public_addresses(
     *,
     resolver: Resolver | None = None,
 ) -> tuple[tuple[int, str], ...]:
-    """Resolve a host and require every returned address to be globally routable."""
+    """Require every resolved address to be globally routable."""
 
     normalized = normalize_upstream_host(host)
     try:
         literal = ipaddress.ip_address(normalized)
     except ValueError:
         try:
-            addresses = tuple(await (resolver or _system_resolver)(normalized, port))
+            addresses = tuple(
+                await (resolver or _system_resolver)(normalized, port)
+            )
         except OSError as exc:
-            raise UnsafeUpstreamHost("upstream host could not be resolved") from exc
+            raise UnsafeUpstreamHost(
+                "upstream host could not be resolved"
+            ) from exc
     else:
         family = socket.AF_INET6 if literal.version == 6 else socket.AF_INET
         addresses = ((family, str(literal)),)
     if not addresses:
         raise UnsafeUpstreamHost("upstream host did not resolve")
-    if any(family not in {socket.AF_INET, socket.AF_INET6} for family, _ in addresses):
-        raise UnsafeUpstreamHost("resolver returned an unsupported address family")
+    if any(
+        family not in {socket.AF_INET, socket.AF_INET6}
+        for family, _ in addresses
+    ):
+        raise UnsafeUpstreamHost(
+            "resolver returned an unsupported address family"
+        )
     try:
-        unsafe = [address for _, address in addresses if not _is_public_address(address)]
+        unsafe = [
+            address
+            for _, address in addresses
+            if not _is_public_address(address)
+        ]
     except ValueError as exc:
-        raise UnsafeUpstreamHost("resolver returned an invalid IP address") from exc
+        raise UnsafeUpstreamHost(
+            "resolver returned an invalid IP address"
+        ) from exc
     if unsafe:
-        raise UnsafeUpstreamHost("upstream host resolved to a non-public IP address")
+        raise UnsafeUpstreamHost(
+            "upstream host resolved to a non-public IP address"
+        )
     return addresses
 
 
@@ -222,7 +283,8 @@ async def _connect_socket(
     sock.setblocking(False)
     try:
         await asyncio.wait_for(
-            asyncio.get_running_loop().sock_connect(sock, (address, port)), timeout
+            asyncio.get_running_loop().sock_connect(sock, (address, port)),
+            timeout,
         )
     except BaseException:
         sock.close()
@@ -230,7 +292,7 @@ async def _connect_socket(
     return sock
 
 
-def _response_parts(response: Any) -> tuple[int, str]:
+def _response_parts(response: SMTPResponse) -> tuple[int, str]:
     code = int(response.code)
     message = response.message
     if isinstance(message, bytes):
@@ -280,7 +342,9 @@ class UpstreamSMTP:
             except (OSError, TimeoutError) as exc:
                 last_error = exc
         if sock is None:
-            raise UpstreamError("could not connect to any validated upstream address") from last_error
+            raise UpstreamError(
+                "could not connect to any validated upstream address"
+            ) from last_error
 
         client = self.client_factory(
             hostname=host,
@@ -320,7 +384,7 @@ class UpstreamSMTP:
         *,
         pre_data_hook: Callable[[], Awaitable[None]] | None = None,
     ) -> DeliveryResult:
-        """Send all envelopes before DATA and never partially deliver recipients."""
+        """Send all envelopes before DATA to prevent partial delivery."""
 
         if self.client is None:
             raise RuntimeError("upstream SMTP client is not connected")
@@ -330,7 +394,9 @@ class UpstreamSMTP:
         rejected = False
         for recipient in recipients:
             try:
-                response = await client.rcpt(recipient, timeout=self.command_timeout)
+                response = await client.rcpt(
+                    recipient, timeout=self.command_timeout
+                )
                 code, detail = _response_parts(response)
             except aiosmtplib.SMTPRecipientRefused as exc:
                 code = int(exc.code)
@@ -347,14 +413,18 @@ class UpstreamSMTP:
         try:
             response = await client.data(message, timeout=self.command_timeout)
         except asyncio.CancelledError as exc:
-            raise DeliveryUncertain("upstream result is unknown after DATA began") from exc
+            raise DeliveryUncertain(
+                "upstream result is unknown after DATA began"
+            ) from exc
         except (
             OSError,
             TimeoutError,
             asyncio.IncompleteReadError,
             aiosmtplib.SMTPServerDisconnected,
         ) as exc:
-            raise DeliveryUncertain("upstream result is unknown after DATA began") from exc
+            raise DeliveryUncertain(
+                "upstream result is unknown after DATA began"
+            ) from exc
         code, detail = _response_parts(response)
         return DeliveryResult(code, detail, tuple(results))
 

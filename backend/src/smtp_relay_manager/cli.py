@@ -22,7 +22,9 @@ LOGGER = logging.getLogger(__name__)
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the management command parser."""
-    parser = argparse.ArgumentParser(description="SMTP Relay Manager administration")
+    parser = argparse.ArgumentParser(
+        description="SMTP Relay Manager administration"
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     create_operator = commands.add_parser(
         "create-operator", help="Create the initial service operator"

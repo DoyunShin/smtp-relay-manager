@@ -22,8 +22,8 @@ def create_app(
     """Create an isolated application instance.
 
     Args:
-        settings: Explicit settings for tests or embedding. Environment settings
-            are loaded when omitted.
+        settings: Explicit settings for tests or embedding.
+            Environment settings are loaded when omitted.
         identity_provider: Authentication implementation. Local passwords are
             used when omitted.
 
@@ -58,7 +58,9 @@ def create_app(
         lifespan=lifespan,
     )
     application.state.settings = app_settings
-    application.state.identity_provider = identity_provider or LocalIdentityProvider()
+    application.state.identity_provider = (
+        identity_provider or LocalIdentityProvider()
+    )
     configure_api(application)
     return application
 

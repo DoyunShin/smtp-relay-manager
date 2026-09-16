@@ -24,6 +24,7 @@ from pydantic import (
     model_validator,
 )
 from sqlalchemy import and_, delete, func, or_, select, text
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -34,9 +35,9 @@ from .models import (
     Domain,
     DomainAdmin,
     Invitation,
+    SendAttempt,
     SenderAddress,
     SenderGrant,
-    SendAttempt,
     SendRecipient,
     SMTPConfig,
     SMTPCredential,
@@ -60,15 +61,25 @@ from .security import (
     hash_secret,
     release_rate_limit,
 )
-from .upstream import UnsafeUpstreamHost, normalize_upstream_host, validate_upstream_host
+from .upstream import (
+    UnsafeUpstreamHost,
+    normalize_upstream_host,
+    validate_upstream_host,
+)
 
 T = TypeVar("T")
 UTCDateTime = Annotated[
     datetime,
     PlainSerializer(
-        lambda value: value.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
-        if value.tzinfo is None
-        else value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        lambda value: (
+            value.replace(tzinfo=timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+            if value.tzinfo is None
+            else value.astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        ),
         return_type=str,
         when_used="json",
     ),
@@ -86,7 +97,11 @@ COMMON_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
         "description": description,
         "content": {
             "application/json": {
-                "example": {"status": status, "message": description, "data": None}
+                "example": {
+                    "status": status,
+                    "message": description,
+                    "data": None,
+                }
             }
         },
     }
@@ -250,7 +265,10 @@ class CreateUserRequest(BaseModel):
         """Normalize and validate a local username."""
         value = value.strip().lower()
         if not USERNAME_PATTERN.fullmatch(value):
-            raise ValueError("Username may contain letters, numbers, dots, dashes, and underscores")
+            raise ValueError(
+                "Username may contain letters, numbers, dots, dashes, "
+                "and underscores"
+            )
         return value
 
 
@@ -316,10 +334,16 @@ class SMTPConfigRequest(BaseModel):
     def validate_auth(self) -> SMTPConfigRequest:
         """Enforce safe transport and authentication combinations."""
         if self.auth_type == "password" and self.security == "none":
-            raise ValueError("Password authentication requires STARTTLS or TLS")
+            raise ValueError(
+                "Password authentication requires STARTTLS or TLS"
+            )
         if self.auth_type == "password" and not self.username:
-            raise ValueError("Username is required for password authentication")
-        if self.username and any(character in self.username for character in "\r\n\x00"):
+            raise ValueError(
+                "Username is required for password authentication"
+            )
+        if self.username and any(
+            character in self.username for character in "\r\n\x00"
+        ):
             raise ValueError("Username contains control characters")
         return self
 
@@ -456,7 +480,9 @@ async def current_principal(
     database: Database,
 ) -> Principal:
     """Authenticate the session cookie and return its current identity."""
-    session_token = request.cookies.get(request.app.state.settings.session_cookie_name)
+    session_token = request.cookies.get(
+        request.app.state.settings.session_cookie_name
+    )
     if not session_token:
         raise AppError(401, "Authentication required")
     now = utc_now()
@@ -481,7 +507,9 @@ async def current_principal(
 PrincipalDependency = Annotated[Principal, Depends(current_principal)]
 
 
-async def csrf_principal(request: Request, principal: PrincipalDependency) -> Principal:
+async def csrf_principal(
+    request: Request, principal: PrincipalDependency
+) -> Principal:
     """Verify origin and CSRF state for an authenticated write."""
     validate_origin(request)
     supplied = request.headers.get("X-CSRF-Token")
@@ -499,10 +527,14 @@ def require_operator(principal: Principal) -> None:
         raise AppError(403, "Operator permission required")
 
 
-async def get_domain(database: AsyncSession, domain_id: str, *, include_deleted: bool = False) -> Domain:
+async def get_domain(
+    database: AsyncSession, domain_id: str, *, include_deleted: bool = False
+) -> Domain:
     """Load a domain or raise a safe not-found error."""
     domain = await database.get(Domain, domain_id)
-    if domain is None or (not include_deleted and domain.deleted_at is not None):
+    if domain is None or (
+        not include_deleted and domain.deleted_at is not None
+    ):
         raise AppError(404, "Domain not found")
     return domain
 
@@ -548,7 +580,9 @@ def smtp_dto(config: SMTPConfig) -> SMTPConfigDTO:
     )
 
 
-async def credential_dto(database: AsyncSession, credential: SMTPCredential) -> CredentialDTO:
+async def credential_dto(
+    database: AsyncSession, credential: SMTPCredential
+) -> CredentialDTO:
     """Build a credential representation including its current scopes."""
     scopes = (
         await database.scalars(
@@ -561,7 +595,10 @@ async def credential_dto(database: AsyncSession, credential: SMTPCredential) -> 
         id=credential.id,
         user_id=credential.user_id,
         name=credential.name,
-        scopes=[ScopeDTO(domain_id=item.domain_id, address=item.address) for item in scopes],
+        scopes=[
+            ScopeDTO(domain_id=item.domain_id, address=item.address)
+            for item in scopes
+        ],
         expires_at=credential.expires_at,
         revoked_at=credential.revoked_at,
         created_at=credential.created_at,
@@ -572,21 +609,27 @@ def configure_api(app: FastAPI) -> None:
     """Install API exception handlers and versioned routes."""
 
     @app.exception_handler(AppError)
-    async def handle_app_error(_request: Request, exc: AppError) -> JSONResponse:
+    async def handle_app_error(
+        _request: Request, exc: AppError
+    ) -> JSONResponse:
         """Render an expected application error with the API envelope."""
         return JSONResponse(
-            content=envelope(exc.status_code, exc.message), status_code=exc.status_code
+            content=envelope(exc.status_code, exc.message),
+            status_code=exc.status_code,
         )
 
     @app.exception_handler(RequestValidationError)
-    async def handle_validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    async def handle_validation_error(
+        _request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
         """Render sanitized request validation details."""
         details = [
             {"loc": item["loc"], "msg": item["msg"], "type": item["type"]}
             for item in exc.errors()
         ]
         return JSONResponse(
-            content=envelope(422, "Request validation failed", details), status_code=422
+            content=envelope(422, "Request validation failed", details),
+            status_code=422,
         )
 
     @app.exception_handler(StarletteHTTPException)
@@ -594,7 +637,11 @@ def configure_api(app: FastAPI) -> None:
         _request: Request, exc: StarletteHTTPException
     ) -> JSONResponse:
         """Render framework routing and method errors consistently."""
-        message = exc.detail if isinstance(exc.detail, str) else "HTTP request failed"
+        message = (
+            exc.detail
+            if isinstance(exc.detail, str)
+            else "HTTP request failed"
+        )
         return JSONResponse(
             content=envelope(exc.status_code, message),
             status_code=exc.status_code,
@@ -602,16 +649,22 @@ def configure_api(app: FastAPI) -> None:
         )
 
     @app.exception_handler(IntegrityError)
-    async def handle_integrity_error(request: Request, _exc: IntegrityError) -> JSONResponse:
+    async def handle_integrity_error(
+        request: Request, _exc: IntegrityError
+    ) -> JSONResponse:
         """Map database uniqueness races to a safe conflict response."""
-        LOGGER.info("Database constraint rejected an API write at %s", request.url.path)
+        LOGGER.info(
+            "Database constraint rejected an API write at %s", request.url.path
+        )
         return JSONResponse(
             content=envelope(409, "Resource conflicts with existing data"),
             status_code=409,
         )
 
     @app.exception_handler(Exception)
-    async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+    async def handle_unexpected_error(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
         """Hide internal failures and avoid logging request secrets."""
         LOGGER.error(
             "Unexpected management API failure type=%s path=%s",
@@ -654,7 +707,12 @@ async def health(database: Database) -> dict[str, Any]:
 
 
 @router.post("/auth/login", response_model=APIEnvelope[AuthDTO])
-async def login(payload: LoginRequest, request: Request, response: Response, database: Database) -> dict[str, Any]:
+async def login(
+    payload: LoginRequest,
+    request: Request,
+    response: Response,
+    database: Database,
+) -> dict[str, Any]:
     """Authenticate a management user and issue a server-side session."""
     validate_origin(request)
     username = payload.username.strip().lower()
@@ -703,24 +761,41 @@ async def login(payload: LoginRequest, request: Request, response: Response, dat
         samesite="lax",
         path="/",
     )
-    return envelope(200, "Login successful", AuthDTO(user=user_dto(user), csrf_token=csrf_token))
+    return envelope(
+        200,
+        "Login successful",
+        AuthDTO(user=user_dto(user), csrf_token=csrf_token),
+    )
 
 
 @router.get("/auth/me", response_model=APIEnvelope[AuthDTO])
 async def me(principal: PrincipalDependency) -> dict[str, Any]:
     """Return the authenticated management identity and CSRF token."""
-    return envelope(200, "Current user", AuthDTO(user=user_dto(principal.user), csrf_token=principal.csrf_token))
+    return envelope(
+        200,
+        "Current user",
+        AuthDTO(
+            user=user_dto(principal.user), csrf_token=principal.csrf_token
+        ),
+    )
 
 
 @router.post("/auth/logout", response_model=APIEnvelope[None])
 async def logout(
-    request: Request, principal: CSRFPrincipal, response: Response, database: Database
+    request: Request,
+    principal: CSRFPrincipal,
+    response: Response,
+    database: Database,
 ) -> dict[str, Any]:
     """Destroy the current server-side session."""
     validate_origin(request)
-    await database.execute(delete(WebSession).where(WebSession.id == principal.session_id))
+    await database.execute(
+        delete(WebSession).where(WebSession.id == principal.session_id)
+    )
     await database.commit()
-    response.delete_cookie(request.app.state.settings.session_cookie_name, path="/")
+    response.delete_cookie(
+        request.app.state.settings.session_cookie_name, path="/"
+    )
     return envelope(200, "Logout successful")
 
 
@@ -747,11 +822,17 @@ async def accept_invitation(
     )
     invitation = await database.scalar(
         select(Invitation)
-        .where(Invitation.id == invitation.id, Invitation.token_hash == token_hash)
+        .where(
+            Invitation.id == invitation.id, Invitation.token_hash == token_hash
+        )
         .with_for_update()
         .execution_options(populate_existing=True)
     )
-    if invitation is None or invitation.used_at is not None or invitation.expires_at <= utc_now():
+    if (
+        invitation is None
+        or invitation.used_at is not None
+        or invitation.expires_at <= utc_now()
+    ):
         raise AppError(400, "Invalid or expired invitation")
     if user is None or user.password_hash is not None:
         raise AppError(400, "Invitation cannot be accepted")
@@ -780,7 +861,11 @@ async def accept_invitation(
         samesite="lax",
         path="/",
     )
-    return envelope(200, "Invitation accepted", AuthDTO(user=user_dto(user), csrf_token=csrf_token))
+    return envelope(
+        200,
+        "Invitation accepted",
+        AuthDTO(user=user_dto(user), csrf_token=csrf_token),
+    )
 
 
 @router.get("/users", response_model=APIEnvelope[PageDTO[UserListItemDTO]])
@@ -793,11 +878,18 @@ async def list_users(
     """List users and their latest invitation for an operator."""
     require_operator(principal)
     total = await database.scalar(select(func.count()).select_from(User)) or 0
-    users = (await database.scalars(select(User).order_by(User.username).limit(limit).offset(offset))).all()
+    users = (
+        await database.scalars(
+            select(User).order_by(User.username).limit(limit).offset(offset)
+        )
+    ).all()
     items: list[UserListItemDTO] = []
     for user in users:
         invitation = await database.scalar(
-            select(Invitation).where(Invitation.user_id == user.id).order_by(Invitation.created_at.desc()).limit(1)
+            select(Invitation)
+            .where(Invitation.user_id == user.id)
+            .order_by(Invitation.created_at.desc())
+            .limit(1)
         )
         invitation_data = None
         if invitation is not None:
@@ -806,11 +898,21 @@ async def list_users(
                 expires_at=invitation.expires_at,
                 used_at=invitation.used_at,
             )
-        items.append(UserListItemDTO(**user_dto(user).model_dump(), invitation=invitation_data))
-    return envelope(200, "Users", PageDTO(items=items, total=total, limit=limit, offset=offset))
+        items.append(
+            UserListItemDTO(
+                **user_dto(user).model_dump(), invitation=invitation_data
+            )
+        )
+    return envelope(
+        200,
+        "Users",
+        PageDTO(items=items, total=total, limit=limit, offset=offset),
+    )
 
 
-@router.post("/users", response_model=APIEnvelope[dict[str, Any]], status_code=201)
+@router.post(
+    "/users", response_model=APIEnvelope[dict[str, Any]], status_code=201
+)
 async def create_user(
     payload: CreateUserRequest,
     request: Request,
@@ -819,15 +921,24 @@ async def create_user(
 ) -> dict[str, Any]:
     """Create a pending user and return a one-time invitation secret."""
     require_operator(principal)
-    if await database.scalar(select(User.id).where(User.username == payload.username)):
+    if await database.scalar(
+        select(User.id).where(User.username == payload.username)
+    ):
         raise AppError(409, "Username already exists")
-    user = User(id=new_id(), username=payload.username, password_hash=None, active=False, is_operator=False)
+    user = User(
+        id=new_id(),
+        username=payload.username,
+        password_hash=None,
+        active=False,
+        is_operator=False,
+    )
     raw_token = generate_secret()
     invitation = Invitation(
         id=new_id(),
         user_id=user.id,
         token_hash=hash_secret(raw_token),
-        expires_at=utc_now() + timedelta(hours=request.app.state.settings.invitation_hours),
+        expires_at=utc_now()
+        + timedelta(hours=request.app.state.settings.invitation_hours),
     )
     database.add(user)
     await database.flush()
@@ -842,7 +953,11 @@ async def create_user(
         invitation_url=invitation_url,
         token=raw_token,
     )
-    return envelope(201, "User created", {"user": user_dto(user), "invitation": invitation_data})
+    return envelope(
+        201,
+        "User created",
+        {"user": user_dto(user), "invitation": invitation_data},
+    )
 
 
 @router.patch("/users/{user_id}", response_model=APIEnvelope[UserDTO])
@@ -886,26 +1001,37 @@ async def update_user(
     removing_operator = payload.is_operator is False and user.is_operator
     if disabling or removing_operator:
         if user.is_operator:
-            active_operator_count = sum(item.active for item in locked_operators)
+            active_operator_count = sum(
+                item.active for item in locked_operators
+            )
             if active_operator_count <= 1:
-                raise AppError(409, "The last active operator cannot be removed or disabled")
+                raise AppError(
+                    409,
+                    "The last active operator cannot be removed or disabled",
+                )
     if disabling:
         owned_domain = await database.scalar(
             select(Domain)
-            .where(Domain.owner_user_id == user.id, Domain.deleted_at.is_(None))
+            .where(
+                Domain.owner_user_id == user.id, Domain.deleted_at.is_(None)
+            )
             .order_by(Domain.id)
             .with_for_update()
             .execution_options(populate_existing=True)
             .limit(1)
         )
         if owned_domain:
-            raise AppError(409, "Transfer owned domains before disabling the user")
+            raise AppError(
+                409, "Transfer owned domains before disabling the user"
+            )
     if payload.active is not None:
         user.active = payload.active
     if payload.is_operator is not None:
         user.is_operator = payload.is_operator
     if payload.active is False:
-        await database.execute(delete(WebSession).where(WebSession.user_id == user.id))
+        await database.execute(
+            delete(WebSession).where(WebSession.user_id == user.id)
+        )
         await database.execute(
             delete(Invitation).where(
                 Invitation.user_id == user.id, Invitation.used_at.is_(None)
@@ -942,13 +1068,16 @@ async def issue_replacement_invitation(
         raise AppError(404, "Invitation not found")
     if user is None or user.password_hash is not None:
         raise AppError(409, "User no longer requires an invitation")
-    await database.execute(delete(Invitation).where(Invitation.user_id == user.id))
+    await database.execute(
+        delete(Invitation).where(Invitation.user_id == user.id)
+    )
     token = generate_secret()
     invitation = Invitation(
         id=new_id(),
         user_id=user.id,
         token_hash=hash_secret(token),
-        expires_at=utc_now() + timedelta(hours=request.app.state.settings.invitation_hours),
+        expires_at=utc_now()
+        + timedelta(hours=request.app.state.settings.invitation_hours),
     )
     database.add(invitation)
     await database.commit()
@@ -963,20 +1092,34 @@ async def issue_replacement_invitation(
     return envelope(200, "Invitation reissued", data)
 
 
-@router.post("/invitations/{invitation_id}/reissue", response_model=APIEnvelope[InvitationDTO])
+@router.post(
+    "/invitations/{invitation_id}/reissue",
+    response_model=APIEnvelope[InvitationDTO],
+)
 async def reissue_invitation(
-    invitation_id: str, request: Request, principal: CSRFPrincipal, database: Database
+    invitation_id: str,
+    request: Request,
+    principal: CSRFPrincipal,
+    database: Database,
 ) -> dict[str, Any]:
     """Reissue an invitation for a pending user."""
-    return await issue_replacement_invitation(invitation_id, request, principal, database)
+    return await issue_replacement_invitation(
+        invitation_id, request, principal, database
+    )
 
 
-@router.delete("/invitations/{invitation_id}", response_model=APIEnvelope[None])
-async def revoke_invitation(invitation_id: str, principal: CSRFPrincipal, database: Database) -> dict[str, Any]:
+@router.delete(
+    "/invitations/{invitation_id}", response_model=APIEnvelope[None]
+)
+async def revoke_invitation(
+    invitation_id: str, principal: CSRFPrincipal, database: Database
+) -> dict[str, Any]:
     """Expire an outstanding invitation."""
     require_operator(principal)
     invitation = await database.scalar(
-        select(Invitation).where(Invitation.id == invitation_id).with_for_update()
+        select(Invitation)
+        .where(Invitation.id == invitation_id)
+        .with_for_update()
     )
     if invitation is None:
         raise AppError(404, "Invitation not found")
@@ -988,7 +1131,9 @@ async def revoke_invitation(invitation_id: str, principal: CSRFPrincipal, databa
 
 
 @router.get("/domains", response_model=APIEnvelope[list[DomainDTO]])
-async def list_domains(principal: PrincipalDependency, database: Database) -> dict[str, Any]:
+async def list_domains(
+    principal: PrincipalDependency, database: Database
+) -> dict[str, Any]:
     """List domains visible through management or sender rights."""
     query = select(Domain).where(Domain.deleted_at.is_(None))
     if not principal.user.is_operator:
@@ -1005,16 +1150,26 @@ async def list_domains(principal: PrincipalDependency, database: Database) -> di
             )
         )
         query = query.where(Domain.id.in_(related_ids))
-    domains = (await database.scalars(query.order_by(Domain.name))).unique().all()
-    return envelope(200, "Domains", [await domain_dto(database, domain) for domain in domains])
+    domains = (
+        (await database.scalars(query.order_by(Domain.name))).unique().all()
+    )
+    return envelope(
+        200,
+        "Domains",
+        [await domain_dto(database, domain) for domain in domains],
+    )
 
 
-@router.post("/domains", response_model=APIEnvelope[DomainDTO], status_code=201)
+@router.post(
+    "/domains", response_model=APIEnvelope[DomainDTO], status_code=201
+)
 async def create_domain(
     payload: CreateDomainRequest, principal: CSRFPrincipal, database: Database
 ) -> dict[str, Any]:
     """Submit a normalized domain registration for operator approval."""
-    existing = await database.scalar(select(Domain.id).where(Domain.active_name == payload.name))
+    existing = await database.scalar(
+        select(Domain.id).where(Domain.active_name == payload.name)
+    )
     if existing:
         raise AppError(409, "Domain is already registered")
     domain = Domain(
@@ -1026,10 +1181,16 @@ async def create_domain(
     )
     database.add(domain)
     await database.commit()
-    return envelope(201, "Domain registration requested", await domain_dto(database, domain))
+    return envelope(
+        201,
+        "Domain registration requested",
+        await domain_dto(database, domain),
+    )
 
 
-async def ensure_domain_visible(database: AsyncSession, principal: Principal, domain: Domain) -> DomainRole | None:
+async def ensure_domain_visible(
+    database: AsyncSession, principal: Principal, domain: Domain
+) -> DomainRole | None:
     """Return a management role or verify a sender grant exists."""
     role = await get_domain_role(database, principal.user, domain)
     if principal.user.is_operator or role is not None:
@@ -1047,8 +1208,12 @@ async def ensure_domain_visible(database: AsyncSession, principal: Principal, do
     return None
 
 
-@router.get("/domains/{domain_id}", response_model=APIEnvelope[DomainDetailDTO])
-async def domain_detail(domain_id: str, principal: PrincipalDependency, database: Database) -> dict[str, Any]:
+@router.get(
+    "/domains/{domain_id}", response_model=APIEnvelope[DomainDetailDTO]
+)
+async def domain_detail(
+    domain_id: str, principal: PrincipalDependency, database: Database
+) -> dict[str, Any]:
     """Return domain details filtered to the caller's role."""
     domain = await get_domain(database, domain_id)
     role = await ensure_domain_visible(database, principal, domain)
@@ -1084,14 +1249,24 @@ async def domain_detail(domain_id: str, principal: PrincipalDependency, database
         .order_by(User.username, SenderGrant.address)
     )
     if not has_management_access:
-        grant_query = grant_query.where(SenderGrant.user_id == principal.user.id)
+        grant_query = grant_query.where(
+            SenderGrant.user_id == principal.user.id
+        )
     grant_rows = (await database.execute(grant_query)).all()
     data = DomainDetailDTO(
         domain=await domain_dto(database, domain),
         role=role,
         smtp_config=smtp_dto(config) if config else None,
-        addresses=[AddressDTO(id=item.id, domain_id=item.domain_id, address=item.address) for item in addresses],
-        admins=[AdminDTO(id=user.id, username=user.username, active=user.active) for user in admin_rows],
+        addresses=[
+            AddressDTO(
+                id=item.id, domain_id=item.domain_id, address=item.address
+            )
+            for item in addresses
+        ],
+        admins=[
+            AdminDTO(id=user.id, username=user.username, active=user.active)
+            for user in admin_rows
+        ],
         grants=[
             GrantDTO(
                 id=grant.id,
@@ -1107,7 +1282,10 @@ async def domain_detail(domain_id: str, principal: PrincipalDependency, database
 
 
 async def set_domain_status(
-    domain_id: str, status: DomainStatus, principal: Principal, database: AsyncSession
+    domain_id: str,
+    status: DomainStatus,
+    principal: Principal,
+    database: AsyncSession,
 ) -> dict[str, Any]:
     """Set a live domain's operator-controlled approval status."""
     require_operator(principal)
@@ -1116,22 +1294,34 @@ async def set_domain_status(
         raise AppError(409, "Domain is already approved")
     domain.status = status
     await database.commit()
-    return envelope(200, f"Domain {status}", await domain_dto(database, domain))
+    return envelope(
+        200, f"Domain {status}", await domain_dto(database, domain)
+    )
 
 
-@router.post("/domains/{domain_id}/approve", response_model=APIEnvelope[DomainDTO])
-async def approve_domain(domain_id: str, principal: CSRFPrincipal, database: Database) -> dict[str, Any]:
+@router.post(
+    "/domains/{domain_id}/approve", response_model=APIEnvelope[DomainDTO]
+)
+async def approve_domain(
+    domain_id: str, principal: CSRFPrincipal, database: Database
+) -> dict[str, Any]:
     """Approve a domain registration as an operator."""
     return await set_domain_status(domain_id, "approved", principal, database)
 
 
-@router.post("/domains/{domain_id}/reject", response_model=APIEnvelope[DomainDTO])
-async def reject_domain(domain_id: str, principal: CSRFPrincipal, database: Database) -> dict[str, Any]:
+@router.post(
+    "/domains/{domain_id}/reject", response_model=APIEnvelope[DomainDTO]
+)
+async def reject_domain(
+    domain_id: str, principal: CSRFPrincipal, database: Database
+) -> dict[str, Any]:
     """Reject or suspend a domain registration as an operator."""
     return await set_domain_status(domain_id, "rejected", principal, database)
 
 
-@router.put("/domains/{domain_id}/owner", response_model=APIEnvelope[DomainDTO])
+@router.put(
+    "/domains/{domain_id}/owner", response_model=APIEnvelope[DomainDTO]
+)
 async def transfer_owner(
     domain_id: str,
     payload: TransferOwnerRequest,
@@ -1139,8 +1329,10 @@ async def transfer_owner(
     database: Database,
 ) -> dict[str, Any]:
     """Transfer domain ownership using locked current user state."""
-    domain = await get_domain(database, domain_id)
-    await require_domain_role(database, principal.user, domain, ("owner",))
+    initial_domain = await get_domain(database, domain_id)
+    await require_domain_role(
+        database, principal.user, initial_domain, ("owner",)
+    )
     new_owner = await find_active_user(database, payload.username)
     domain = await database.scalar(
         select(Domain)
@@ -1155,14 +1347,24 @@ async def transfer_owner(
         raise AppError(409, "User already owns the domain")
     domain.owner_user_id = new_owner.id
     await database.execute(
-        delete(DomainAdmin).where(DomainAdmin.domain_id == domain.id, DomainAdmin.user_id == new_owner.id)
+        delete(DomainAdmin).where(
+            DomainAdmin.domain_id == domain.id,
+            DomainAdmin.user_id == new_owner.id,
+        )
     )
     await database.commit()
-    return envelope(200, "Domain ownership transferred", await domain_dto(database, domain))
+    return envelope(
+        200, "Domain ownership transferred", await domain_dto(database, domain)
+    )
 
 
-@router.put("/domains/{domain_id}/admins/{username}", response_model=APIEnvelope[AdminDTO])
-async def add_admin(domain_id: str, username: str, principal: CSRFPrincipal, database: Database) -> dict[str, Any]:
+@router.put(
+    "/domains/{domain_id}/admins/{username}",
+    response_model=APIEnvelope[AdminDTO],
+)
+async def add_admin(
+    domain_id: str, username: str, principal: CSRFPrincipal, database: Database
+) -> dict[str, Any]:
     """Grant domain administration to an activated user."""
     domain = await get_domain(database, domain_id)
     await require_domain_role(database, principal.user, domain, ("owner",))
@@ -1181,17 +1383,26 @@ async def add_admin(domain_id: str, username: str, principal: CSRFPrincipal, dat
     )
 
 
-@router.delete("/domains/{domain_id}/admins/{username}", response_model=APIEnvelope[None])
-async def remove_admin(domain_id: str, username: str, principal: CSRFPrincipal, database: Database) -> dict[str, Any]:
+@router.delete(
+    "/domains/{domain_id}/admins/{username}", response_model=APIEnvelope[None]
+)
+async def remove_admin(
+    domain_id: str, username: str, principal: CSRFPrincipal, database: Database
+) -> dict[str, Any]:
     """Remove a user's domain administration role."""
     domain = await get_domain(database, domain_id)
     await require_domain_role(database, principal.user, domain, ("owner",))
-    user = await database.scalar(select(User).where(User.username == username.strip().lower()))
+    user = await database.scalar(
+        select(User).where(User.username == username.strip().lower())
+    )
     if user is None:
         raise AppError(404, "User not found")
     result = await database.execute(
-        delete(DomainAdmin).where(DomainAdmin.domain_id == domain.id, DomainAdmin.user_id == user.id)
+        delete(DomainAdmin).where(
+            DomainAdmin.domain_id == domain.id, DomainAdmin.user_id == user.id
+        )
     )
+    assert isinstance(result, CursorResult)
     if result.rowcount == 0:
         raise AppError(404, "Domain administrator not found")
     await database.commit()
@@ -1199,7 +1410,9 @@ async def remove_admin(domain_id: str, username: str, principal: CSRFPrincipal, 
 
 
 @router.delete("/domains/{domain_id}", response_model=APIEnvelope[DomainDTO])
-async def delete_domain(domain_id: str, principal: CSRFPrincipal, database: Database) -> dict[str, Any]:
+async def delete_domain(
+    domain_id: str, principal: CSRFPrincipal, database: Database
+) -> dict[str, Any]:
     """Soft-delete an owned domain without reusing its identity."""
     domain = await get_domain(database, domain_id)
     await require_domain_role(database, principal.user, domain, ("owner",))
@@ -1210,11 +1423,18 @@ async def delete_domain(domain_id: str, principal: CSRFPrincipal, database: Data
     return envelope(200, "Domain deleted", result)
 
 
-@router.get("/domains/{domain_id}/addresses", response_model=APIEnvelope[list[AddressDTO]])
-async def list_addresses(domain_id: str, principal: PrincipalDependency, database: Database) -> dict[str, Any]:
+@router.get(
+    "/domains/{domain_id}/addresses",
+    response_model=APIEnvelope[list[AddressDTO]],
+)
+async def list_addresses(
+    domain_id: str, principal: PrincipalDependency, database: Database
+) -> dict[str, Any]:
     """List registered addresses for a managed domain."""
     domain = await get_domain(database, domain_id)
-    await require_domain_role(database, principal.user, domain, ("owner", "admin"))
+    await require_domain_role(
+        database, principal.user, domain, ("owner", "admin")
+    )
     rows = (
         await database.scalars(
             select(SenderAddress)
@@ -1232,16 +1452,28 @@ async def list_addresses(domain_id: str, principal: PrincipalDependency, databas
     )
 
 
-@router.post("/domains/{domain_id}/addresses", response_model=APIEnvelope[AddressDTO], status_code=201)
+@router.post(
+    "/domains/{domain_id}/addresses",
+    response_model=APIEnvelope[AddressDTO],
+    status_code=201,
+)
 async def create_address(
-    domain_id: str, payload: CreateAddressRequest, principal: CSRFPrincipal, database: Database
+    domain_id: str,
+    payload: CreateAddressRequest,
+    principal: CSRFPrincipal,
+    database: Database,
 ) -> dict[str, Any]:
     """Register an exact sender address in a managed domain."""
     domain = await get_domain(database, domain_id)
-    await require_domain_role(database, principal.user, domain, ("owner", "admin"))
+    await require_domain_role(
+        database, principal.user, domain, ("owner", "admin")
+    )
     address = domain_address(payload.address, domain)
     existing = await database.scalar(
-        select(SenderAddress.id).where(SenderAddress.domain_id == domain.id, SenderAddress.address == address)
+        select(SenderAddress.id).where(
+            SenderAddress.domain_id == domain.id,
+            SenderAddress.address == address,
+        )
     )
     if existing:
         raise AppError(409, "Sender address already exists")
@@ -1255,18 +1487,29 @@ async def create_address(
     )
 
 
-@router.delete("/domains/{domain_id}/addresses/{address_id}", response_model=APIEnvelope[None])
+@router.delete(
+    "/domains/{domain_id}/addresses/{address_id}",
+    response_model=APIEnvelope[None],
+)
 async def delete_address(
-    domain_id: str, address_id: str, principal: CSRFPrincipal, database: Database
+    domain_id: str,
+    address_id: str,
+    principal: CSRFPrincipal,
+    database: Database,
 ) -> dict[str, Any]:
     """Delete an address and exact grants and scopes tied to it."""
     domain = await get_domain(database, domain_id)
-    await require_domain_role(database, principal.user, domain, ("owner", "admin"))
+    await require_domain_role(
+        database, principal.user, domain, ("owner", "admin")
+    )
     address = await database.get(SenderAddress, address_id)
     if address is None or address.domain_id != domain.id:
         raise AppError(404, "Sender address not found")
     await database.execute(
-        delete(SenderGrant).where(SenderGrant.domain_id == domain.id, SenderGrant.address == address.address)
+        delete(SenderGrant).where(
+            SenderGrant.domain_id == domain.id,
+            SenderGrant.address == address.address,
+        )
     )
     await database.execute(
         delete(CredentialScope).where(
@@ -1279,11 +1522,17 @@ async def delete_address(
     return envelope(200, "Sender address deleted")
 
 
-@router.get("/domains/{domain_id}/grants", response_model=APIEnvelope[list[GrantDTO]])
-async def list_grants(domain_id: str, principal: PrincipalDependency, database: Database) -> dict[str, Any]:
+@router.get(
+    "/domains/{domain_id}/grants", response_model=APIEnvelope[list[GrantDTO]]
+)
+async def list_grants(
+    domain_id: str, principal: PrincipalDependency, database: Database
+) -> dict[str, Any]:
     """List sender grants for a managed domain."""
     domain = await get_domain(database, domain_id)
-    await require_domain_role(database, principal.user, domain, ("owner", "admin"))
+    await require_domain_role(
+        database, principal.user, domain, ("owner", "admin")
+    )
     rows = (
         await database.execute(
             select(SenderGrant, User)
@@ -1308,22 +1557,36 @@ async def list_grants(domain_id: str, principal: PrincipalDependency, database: 
     )
 
 
-@router.post("/domains/{domain_id}/grants", response_model=APIEnvelope[GrantDTO], status_code=201)
+@router.post(
+    "/domains/{domain_id}/grants",
+    response_model=APIEnvelope[GrantDTO],
+    status_code=201,
+)
 async def create_grant(
-    domain_id: str, payload: CreateGrantRequest, principal: CSRFPrincipal, database: Database
+    domain_id: str,
+    payload: CreateGrantRequest,
+    principal: CSRFPrincipal,
+    database: Database,
 ) -> dict[str, Any]:
     """Grant an activated user an exact address or whole domain."""
     domain = await get_domain(database, domain_id)
-    await require_domain_role(database, principal.user, domain, ("owner", "admin"))
+    await require_domain_role(
+        database, principal.user, domain, ("owner", "admin")
+    )
     user = await find_active_user(database, payload.username)
     address = payload.address
     if address != "*":
         address = domain_address(address, domain)
         exists = await database.scalar(
-            select(SenderAddress.id).where(SenderAddress.domain_id == domain.id, SenderAddress.address == address)
+            select(SenderAddress.id).where(
+                SenderAddress.domain_id == domain.id,
+                SenderAddress.address == address,
+            )
         )
         if not exists:
-            raise AppError(422, "Register the sender address before granting it")
+            raise AppError(
+                422, "Register the sender address before granting it"
+            )
     existing = await database.scalar(
         select(SenderGrant.id).where(
             SenderGrant.domain_id == domain.id,
@@ -1333,21 +1596,35 @@ async def create_grant(
     )
     if existing:
         raise AppError(409, "Sender grant already exists")
-    grant = SenderGrant(id=new_id(), domain_id=domain.id, user_id=user.id, address=address)
+    grant = SenderGrant(
+        id=new_id(), domain_id=domain.id, user_id=user.id, address=address
+    )
     database.add(grant)
     await database.commit()
     return envelope(
         201,
         "Sender grant created",
-        GrantDTO(id=grant.id, domain_id=domain.id, user_id=user.id, username=user.username, address=address),
+        GrantDTO(
+            id=grant.id,
+            domain_id=domain.id,
+            user_id=user.id,
+            username=user.username,
+            address=address,
+        ),
     )
 
 
-@router.delete("/domains/{domain_id}/grants/{grant_id}", response_model=APIEnvelope[None])
-async def delete_grant(domain_id: str, grant_id: str, principal: CSRFPrincipal, database: Database) -> dict[str, Any]:
+@router.delete(
+    "/domains/{domain_id}/grants/{grant_id}", response_model=APIEnvelope[None]
+)
+async def delete_grant(
+    domain_id: str, grant_id: str, principal: CSRFPrincipal, database: Database
+) -> dict[str, Any]:
     """Revoke a sender grant immediately."""
     domain = await get_domain(database, domain_id)
-    await require_domain_role(database, principal.user, domain, ("owner", "admin"))
+    await require_domain_role(
+        database, principal.user, domain, ("owner", "admin")
+    )
     grant = await database.get(SenderGrant, grant_id)
     if grant is None or grant.domain_id != domain.id:
         raise AppError(404, "Sender grant not found")
@@ -1356,16 +1633,25 @@ async def delete_grant(domain_id: str, grant_id: str, principal: CSRFPrincipal, 
     return envelope(200, "Sender grant deleted")
 
 
-@router.get("/domains/{domain_id}/smtp", response_model=APIEnvelope[SMTPConfigDTO | None])
-async def get_smtp_config(domain_id: str, principal: PrincipalDependency, database: Database) -> dict[str, Any]:
+@router.get(
+    "/domains/{domain_id}/smtp",
+    response_model=APIEnvelope[SMTPConfigDTO | None],
+)
+async def get_smtp_config(
+    domain_id: str, principal: PrincipalDependency, database: Database
+) -> dict[str, Any]:
     """Return an owner's redacted upstream SMTP configuration."""
     domain = await get_domain(database, domain_id)
     await require_domain_role(database, principal.user, domain, ("owner",))
     config = await database.get(SMTPConfig, domain.id)
-    return envelope(200, "SMTP configuration", smtp_dto(config) if config else None)
+    return envelope(
+        200, "SMTP configuration", smtp_dto(config) if config else None
+    )
 
 
-@router.put("/domains/{domain_id}/smtp", response_model=APIEnvelope[SMTPConfigDTO])
+@router.put(
+    "/domains/{domain_id}/smtp", response_model=APIEnvelope[SMTPConfigDTO]
+)
 async def put_smtp_config(
     domain_id: str,
     payload: SMTPConfigRequest,
@@ -1379,7 +1665,9 @@ async def put_smtp_config(
     try:
         await validate_upstream_host(payload.host, payload.port)
     except UnsafeUpstreamHost as exc:
-        raise AppError(422, "SMTP host must resolve only to public IP addresses") from exc
+        raise AppError(
+            422, "SMTP host must resolve only to public IP addresses"
+        ) from exc
     config = await database.get(SMTPConfig, domain.id)
     if config is None:
         config = SMTPConfig(
@@ -1402,9 +1690,13 @@ async def put_smtp_config(
     else:
         config.username = payload.username
         if payload.password:
-            config.password_encrypted = encrypt_password(payload.password, request.app.state.settings.encryption_key)
+            config.password_encrypted = encrypt_password(
+                payload.password, request.app.state.settings.encryption_key
+            )
         elif config.password_encrypted is None:
-            raise AppError(422, "Password is required for password authentication")
+            raise AppError(
+                422, "Password is required for password authentication"
+            )
     await database.commit()
     return envelope(200, "SMTP configuration updated", smtp_dto(config))
 
@@ -1417,7 +1709,11 @@ async def validated_scopes(
     seen: set[tuple[str, str]] = set()
     for item in scopes:
         domain = await get_domain(database, item.domain_id)
-        address = item.address if item.address == "*" else domain_address(item.address, domain)
+        address = (
+            item.address
+            if item.address == "*"
+            else domain_address(item.address, domain)
+        )
         key = (domain.id, address)
         if key in seen:
             raise AppError(422, "Credential scopes must be unique")
@@ -1427,8 +1723,12 @@ async def validated_scopes(
     return unique_scopes
 
 
-@router.get("/smtp-credentials", response_model=APIEnvelope[list[CredentialDTO]])
-async def list_credentials(principal: PrincipalDependency, database: Database) -> dict[str, Any]:
+@router.get(
+    "/smtp-credentials", response_model=APIEnvelope[list[CredentialDTO]]
+)
+async def list_credentials(
+    principal: PrincipalDependency, database: Database
+) -> dict[str, Any]:
     """List the authenticated user's SMTP credentials."""
     credentials = (
         await database.scalars(
@@ -1437,15 +1737,27 @@ async def list_credentials(principal: PrincipalDependency, database: Database) -
             .order_by(SMTPCredential.created_at.desc())
         )
     ).all()
-    return envelope(200, "SMTP credentials", [await credential_dto(database, item) for item in credentials])
+    return envelope(
+        200,
+        "SMTP credentials",
+        [await credential_dto(database, item) for item in credentials],
+    )
 
 
-@router.post("/smtp-credentials", response_model=APIEnvelope[CreatedCredentialDTO], status_code=201)
+@router.post(
+    "/smtp-credentials",
+    response_model=APIEnvelope[CreatedCredentialDTO],
+    status_code=201,
+)
 async def create_credential(
-    payload: CreateCredentialRequest, principal: CSRFPrincipal, database: Database
+    payload: CreateCredentialRequest,
+    principal: CSRFPrincipal,
+    database: Database,
 ) -> dict[str, Any]:
     """Issue a scoped SMTP password and reveal it once."""
-    scopes = await validated_scopes(database, principal.user.id, payload.scopes)
+    scopes = await validated_scopes(
+        database, principal.user.id, payload.scopes
+    )
     token = generate_secret()
     credential = SMTPCredential(
         id=new_id(),
@@ -1458,7 +1770,12 @@ async def create_credential(
     await database.flush()
     for domain_id, address in scopes:
         database.add(
-            CredentialScope(id=new_id(), credential_id=credential.id, domain_id=domain_id, address=address)
+            CredentialScope(
+                id=new_id(),
+                credential_id=credential.id,
+                domain_id=domain_id,
+                address=address,
+            )
         )
     await database.commit()
     data = CreatedCredentialDTO(
@@ -1469,7 +1786,9 @@ async def create_credential(
     return envelope(201, "SMTP credential created", data)
 
 
-async def owned_credential(database: AsyncSession, principal: Principal, credential_id: str) -> SMTPCredential:
+async def owned_credential(
+    database: AsyncSession, principal: Principal, credential_id: str
+) -> SMTPCredential:
     """Return a credential only when it belongs to the caller."""
     credential = await database.get(SMTPCredential, credential_id)
     if credential is None or credential.user_id != principal.user.id:
@@ -1477,7 +1796,10 @@ async def owned_credential(database: AsyncSession, principal: Principal, credent
     return credential
 
 
-@router.put("/smtp-credentials/{credential_id}/scopes", response_model=APIEnvelope[CredentialDTO])
+@router.put(
+    "/smtp-credentials/{credential_id}/scopes",
+    response_model=APIEnvelope[CredentialDTO],
+)
 async def update_credential_scopes(
     credential_id: str,
     payload: UpdateScopesRequest,
@@ -1488,19 +1810,37 @@ async def update_credential_scopes(
     credential = await owned_credential(database, principal, credential_id)
     if credential.revoked_at is not None:
         raise AppError(409, "Revoked credentials cannot be changed")
-    scopes = await validated_scopes(database, principal.user.id, payload.scopes)
-    await database.execute(delete(CredentialScope).where(CredentialScope.credential_id == credential.id))
+    scopes = await validated_scopes(
+        database, principal.user.id, payload.scopes
+    )
+    await database.execute(
+        delete(CredentialScope).where(
+            CredentialScope.credential_id == credential.id
+        )
+    )
     database.add_all(
         [
-            CredentialScope(id=new_id(), credential_id=credential.id, domain_id=domain_id, address=address)
+            CredentialScope(
+                id=new_id(),
+                credential_id=credential.id,
+                domain_id=domain_id,
+                address=address,
+            )
             for domain_id, address in scopes
         ]
     )
     await database.commit()
-    return envelope(200, "Credential scopes updated", await credential_dto(database, credential))
+    return envelope(
+        200,
+        "Credential scopes updated",
+        await credential_dto(database, credential),
+    )
 
 
-@router.post("/smtp-credentials/{credential_id}/revoke", response_model=APIEnvelope[CredentialDTO])
+@router.post(
+    "/smtp-credentials/{credential_id}/revoke",
+    response_model=APIEnvelope[CredentialDTO],
+)
 async def revoke_credential(
     credential_id: str, principal: CSRFPrincipal, database: Database
 ) -> dict[str, Any]:
@@ -1509,7 +1849,11 @@ async def revoke_credential(
     if credential.revoked_at is None:
         credential.revoked_at = utc_now()
         await database.commit()
-    return envelope(200, "SMTP credential revoked", await credential_dto(database, credential))
+    return envelope(
+        200,
+        "SMTP credential revoked",
+        await credential_dto(database, credential),
+    )
 
 
 @router.get("/logs", response_model=APIEnvelope[PageDTO[LogDTO]])
@@ -1530,7 +1874,12 @@ async def list_logs(
             Domain.owner_user_id == principal.user.id,
             Domain.deleted_at.is_(None),
         )
-        conditions.append(or_(SendAttempt.user_id == principal.user.id, SendAttempt.domain_id.in_(owned_domains)))
+        conditions.append(
+            or_(
+                SendAttempt.user_id == principal.user.id,
+                SendAttempt.domain_id.in_(owned_domains),
+            )
+        )
     if domain_id:
         conditions.append(SendAttempt.domain_id == domain_id)
     if status:
@@ -1538,7 +1887,9 @@ async def list_logs(
     if sender:
         conditions.append(SendAttempt.sender == sender.strip().lower())
     if recipient:
-        attempt_ids = select(SendRecipient.attempt_id).where(SendRecipient.address == recipient.strip().lower())
+        attempt_ids = select(SendRecipient.attempt_id).where(
+            SendRecipient.address == recipient.strip().lower()
+        )
         conditions.append(SendAttempt.id.in_(attempt_ids))
     base = select(SendAttempt)
     count_query = select(func.count()).select_from(SendAttempt)
@@ -1547,7 +1898,11 @@ async def list_logs(
         count_query = count_query.where(and_(*conditions))
     total = await database.scalar(count_query) or 0
     attempts = (
-        await database.scalars(base.order_by(SendAttempt.created_at.desc()).limit(limit).offset(offset))
+        await database.scalars(
+            base.order_by(SendAttempt.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
     ).all()
     items: list[LogDTO] = []
     for attempt in attempts:
@@ -1574,4 +1929,8 @@ async def list_logs(
                 updated_at=attempt.updated_at,
             )
         )
-    return envelope(200, "Send logs", PageDTO(items=items, total=total, limit=limit, offset=offset))
+    return envelope(
+        200,
+        "Send logs",
+        PageDTO(items=items, total=total, limit=limit, offset=offset),
+    )
