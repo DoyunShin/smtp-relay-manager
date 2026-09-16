@@ -1,0 +1,10 @@
+.git
+.opencode
+.venv
+backend/.venv
+frontend/node_modules
+frontend/.svelte-kit
+frontend/build
+.env
+**/*.pem
+**/__pycache__
