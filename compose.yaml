@@ -1,0 +1,71 @@
+name: smtp-relay-manager
+
+x-environment: &app-environment
+  DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY}
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?Set PUBLIC_BASE_URL}
+  TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
+  SMTP_HOSTNAME: ${SMTP_HOSTNAME:?Set SMTP_HOSTNAME}
+  SMTP_CERT_DIR: /app/cert
+  SMTP_MAX_MESSAGE_BYTES: ${SMTP_MAX_MESSAGE_BYTES:-26214400}
+  SMTP_MAX_RECIPIENTS: ${SMTP_MAX_RECIPIENTS:-100}
+  SMTP_MAX_CONNECTIONS: ${SMTP_MAX_CONNECTIONS:-32}
+  SMTP_MAX_DATA_CONNECTIONS: ${SMTP_MAX_DATA_CONNECTIONS:-4}
+  SMTP_IDLE_TIMEOUT: ${SMTP_IDLE_TIMEOUT:-60}
+  SMTP_CONNECT_TIMEOUT: ${SMTP_CONNECT_TIMEOUT:-15}
+  SMTP_COMMAND_TIMEOUT: ${SMTP_COMMAND_TIMEOUT:-30}
+  SMTP_TRANSACTION_TIMEOUT: ${SMTP_TRANSACTION_TIMEOUT:-120}
+  SMTP_CERT_RELOAD_SECONDS: ${SMTP_CERT_RELOAD_SECONDS:-30}
+
+x-backend: &backend
+  image: smtp-relay-manager-backend:local
+  environment: *app-environment
+  restart: unless-stopped
+  init: true
+
+services:
+  migrate:
+    <<: *backend
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  backend:
+    <<: *backend
+    build: ./backend
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  smtp:
+    <<: *backend
+    command: ["python", "-m", "smtp_relay_manager.smtp"]
+    stop_grace_period: ${SMTP_STOP_GRACE_PERIOD:-150s}
+    ports:
+      - "${SMTP_BIND_ADDRESS:-0.0.0.0}:465:8465"
+      - "${SMTP_BIND_ADDRESS:-0.0.0.0}:587:8587"
+    volumes:
+      - "${SMTP_CERT_DIR:?Set SMTP_CERT_DIR}:/app/cert:ro"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,socket,ssl; c=ssl.create_default_context(cafile='/app/cert/fullchain.pem'); c.verify_flags|=ssl.VERIFY_X509_PARTIAL_CHAIN; s=c.wrap_socket(socket.create_connection(('127.0.0.1',8465),timeout=3),server_hostname=os.environ['SMTP_HOSTNAME']); assert s.recv(1024).startswith(b'220'); s.close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  nginx:
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
+    ports:
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
