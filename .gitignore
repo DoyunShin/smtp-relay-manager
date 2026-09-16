@@ -216,3 +216,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Frontend build and browser test artifacts
+node_modules/
+.svelte-kit/
+playwright-report/
+test-results/
+*.pem
+
+# Svelte source modules are not Python build artifacts.
+!frontend/src/lib/
+!frontend/src/lib/**
